@@ -16,7 +16,7 @@ use super::Term;
 
 pub(super) type WsWrite = SplitSink<WsStream, Message>;
 
-pub(super) const TABS: [&str; 8] = [
+pub(super) const TABS: [&str; 10] = [
     "Overview",
     "Devices",
     "Filesystems",
@@ -25,6 +25,8 @@ pub(super) const TABS: [&str; 8] = [
     "Shares",
     "Protocols",
     "Users",
+    "Alerts",
+    "System",
 ];
 const TAB_DEVICES: usize = 1;
 const TAB_FILESYSTEMS: usize = 2;
@@ -33,6 +35,8 @@ const TAB_SNAPSHOTS: usize = 4;
 const TAB_SHARES: usize = 5;
 const TAB_PROTOCOLS: usize = 6;
 const TAB_USERS: usize = 7;
+const TAB_ALERTS: usize = 8;
+const TAB_SYSTEM: usize = 9;
 
 // Stable request ids: one per query kind, so responses route without a
 // pending-request map.
@@ -47,6 +51,13 @@ const ID_PROTO: i64 = 6;
 const ID_USERS: i64 = 7;
 const ID_SMB_USERS: i64 = 8;
 const ID_SMB_GROUPS: i64 = 9;
+const ID_ISCSI: i64 = 10;
+const ID_NVMEOF: i64 = 11;
+const ID_ALERT_RULES: i64 = 12;
+const ID_SETTINGS: i64 = 13;
+const ID_SSH: i64 = 14;
+const ID_STATS: i64 = 102;
+const ID_ALERTS: i64 = 103;
 const ID_ACTION: i64 = 200;
 /// Per-filesystem snapshot queries get ID_SNAP_BASE + index.
 const ID_SNAP_BASE: i64 = 300;
@@ -59,6 +70,9 @@ pub(super) struct FormField {
     pub secret: bool,
     /// Select fields cycle options with ←/→ instead of free text.
     pub options: Option<(Vec<String>, usize)>,
+    /// Multi-select fields: (item, checked) toggled with space, cursor
+    /// moved with ←/→.
+    pub multi: Option<(Vec<(String, bool)>, usize)>,
 }
 
 impl FormField {
@@ -68,6 +82,7 @@ impl FormField {
             value: value.to_string(),
             secret: false,
             options: None,
+            multi: None,
         }
     }
     fn secret(label: &'static str) -> Self {
@@ -76,6 +91,7 @@ impl FormField {
             value: String::new(),
             secret: true,
             options: None,
+            multi: None,
         }
     }
     fn select(label: &'static str, options: Vec<String>, idx: usize) -> Self {
@@ -84,9 +100,38 @@ impl FormField {
             value: String::new(),
             secret: false,
             options: Some((options, idx)),
+            multi: None,
+        }
+    }
+    fn multi(label: &'static str, items: Vec<String>) -> Self {
+        Self {
+            label,
+            value: String::new(),
+            secret: false,
+            options: None,
+            multi: Some((items.into_iter().map(|i| (i, false)).collect(), 0)),
         }
     }
     pub fn display(&self) -> String {
+        if let Some((items, cursor)) = &self.multi {
+            if items.is_empty() {
+                return "(none available)".to_string();
+            }
+            return items
+                .iter()
+                .enumerate()
+                .map(|(i, (item, checked))| {
+                    let mark = if *checked { "▣" } else { "▢" };
+                    let short = item.strip_prefix("/dev/").unwrap_or(item);
+                    if i == *cursor {
+                        format!("[{mark} {short}]")
+                    } else {
+                        format!(" {mark} {short} ")
+                    }
+                })
+                .collect::<Vec<_>>()
+                .join("");
+        }
         match &self.options {
             Some((opts, idx)) => format!("◂ {} ▸", opts.get(*idx).cloned().unwrap_or_default()),
             None if self.secret => "•".repeat(self.value.chars().count()),
@@ -94,6 +139,14 @@ impl FormField {
         }
     }
     fn chosen(&self) -> String {
+        if let Some((items, _)) = &self.multi {
+            return items
+                .iter()
+                .filter(|(_, c)| *c)
+                .map(|(i, _)| i.clone())
+                .collect::<Vec<_>>()
+                .join(",");
+        }
         match &self.options {
             Some((opts, idx)) => opts.get(*idx).cloned().unwrap_or_default(),
             None => self.value.trim().to_string(),
@@ -132,6 +185,11 @@ enum FormKind {
         snapshot: String,
         subvolume: Option<String>,
     },
+    CreateAlertRule,
+    AddSshKey,
+    EditSetting {
+        key: &'static str,
+    },
 }
 
 pub(super) struct Confirm {
@@ -166,6 +224,17 @@ pub(super) struct App {
     pub users: Vec<Value>,
     pub smb_users: Vec<Value>,
     pub smb_groups: Vec<Value>,
+    pub iscsi: Vec<Value>,
+    pub nvmeof: Vec<Value>,
+    pub alerts: Vec<Value>,
+    pub alert_rules: Vec<Value>,
+    pub settings: Option<Value>,
+    pub ssh: Option<Value>,
+    pub stats: Option<Value>,
+    /// CPU load (percent of cores) history for the dashboard sparkline.
+    pub cpu_history: Vec<u64>,
+    /// Memory-used percent history for the dashboard sparkline.
+    pub mem_history: Vec<u64>,
     pub status: String,
     pub show_help: bool,
     pub modal: Modal,
@@ -193,6 +262,15 @@ impl App {
             users: Vec::new(),
             smb_users: Vec::new(),
             smb_groups: Vec::new(),
+            iscsi: Vec::new(),
+            nvmeof: Vec::new(),
+            alerts: Vec::new(),
+            alert_rules: Vec::new(),
+            settings: None,
+            ssh: None,
+            stats: None,
+            cpu_history: Vec::new(),
+            mem_history: Vec::new(),
             status: "loading…".to_string(),
             show_help: false,
             modal: Modal::None,
@@ -218,11 +296,75 @@ impl App {
             TAB_FILESYSTEMS => self.filesystems.len(),
             TAB_SUBVOLUMES => self.subvolumes.len(),
             TAB_SNAPSHOTS => self.snapshots.len(),
-            TAB_SHARES => self.nfs.len() + self.smb.len(),
+            TAB_SHARES => self.nfs.len() + self.smb.len() + self.iscsi.len() + self.nvmeof.len(),
             TAB_PROTOCOLS => self.protocols.len(),
             TAB_USERS => self.users.len() + self.smb_users.len() + self.smb_groups.len(),
+            TAB_ALERTS => self.alert_rules.len(),
+            TAB_SYSTEM => self.system_rows().len(),
             _ => 0,
         }
+    }
+
+    /// The System tab is a flat list of editable settings + SSH keys.
+    pub(super) fn system_rows(&self) -> Vec<SystemRow> {
+        let s = self.settings.clone().unwrap_or(Value::Null);
+        let sval = |k: &str| {
+            s.get(k)
+                .map(|v| match v {
+                    Value::String(x) => x.clone(),
+                    Value::Bool(b) => b.to_string(),
+                    other => other.to_string(),
+                })
+                .unwrap_or_else(|| "-".into())
+        };
+        let mut rows = vec![
+            SystemRow {
+                label: "hostname".into(),
+                value: sval("hostname"),
+                kind: SystemRowKind::Setting("hostname"),
+            },
+            SystemRow {
+                label: "timezone".into(),
+                value: sval("timezone"),
+                kind: SystemRowKind::Setting("timezone"),
+            },
+            SystemRow {
+                label: "24h clock".into(),
+                value: sval("clock_24h"),
+                kind: SystemRowKind::SettingToggle("clock_24h"),
+            },
+            SystemRow {
+                label: "temp unit".into(),
+                value: sval("temp_unit"),
+                kind: SystemRowKind::Setting("temp_unit"),
+            },
+        ];
+        if let Some(ssh) = &self.ssh {
+            let pw = ssh
+                .get("password_auth")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false);
+            rows.push(SystemRow {
+                label: "ssh password auth".into(),
+                value: pw.to_string(),
+                kind: SystemRowKind::Info,
+            });
+            for key in ssh
+                .get("keys")
+                .and_then(|v| v.as_array())
+                .cloned()
+                .unwrap_or_default()
+            {
+                let key = key.as_str().unwrap_or_default().to_string();
+                let short = key.split_whitespace().last().unwrap_or("key").to_string();
+                rows.push(SystemRow {
+                    label: format!("ssh key · {short}"),
+                    value: format!("{}…", key.chars().take(28).collect::<String>()),
+                    kind: SystemRowKind::SshKey(key),
+                });
+            }
+        }
+        rows
     }
 
     /// What the Users-tab selection points at.
@@ -239,11 +381,19 @@ impl App {
 
     /// What the Shares-tab selection points at.
     pub(super) fn shares_selection(&self) -> SharesSelection {
-        if self.selected < self.nfs.len() {
-            SharesSelection::Nfs(self.selected)
-        } else {
-            SharesSelection::Smb(self.selected - self.nfs.len())
+        let mut i = self.selected;
+        if i < self.nfs.len() {
+            return SharesSelection::Nfs(i);
         }
+        i -= self.nfs.len();
+        if i < self.smb.len() {
+            return SharesSelection::Smb(i);
+        }
+        i -= self.smb.len();
+        if i < self.iscsi.len() {
+            return SharesSelection::Iscsi(i);
+        }
+        SharesSelection::Nvmeof(i - self.iscsi.len())
     }
 
     fn fs_names(&self) -> Vec<String> {
@@ -271,6 +421,25 @@ pub(super) enum UsersSelection {
 pub(super) enum SharesSelection {
     Nfs(usize),
     Smb(usize),
+    Iscsi(usize),
+    Nvmeof(usize),
+}
+
+pub(super) struct SystemRow {
+    pub label: String,
+    pub value: String,
+    pub kind: SystemRowKind,
+}
+
+pub(super) enum SystemRowKind {
+    /// Editable free-text setting (system.settings.update key).
+    Setting(&'static str),
+    /// Boolean setting flipped directly on Enter/e.
+    SettingToggle(&'static str),
+    /// An authorized SSH key (deletable).
+    SshKey(String),
+    /// Display-only.
+    Info,
 }
 
 /// Run the main view loop until the user quits.
@@ -309,8 +478,14 @@ pub(super) async fn run_app(
                 }
             }
             _ = tick.tick(), if app.connected => {
-                // Keep uptime and live fields fresh.
-                let _ = write.send(client::request(ID_SYSINFO, "system.info", Value::Null)).await;
+                // Keep uptime, live stats, and alerts fresh.
+                for (id, method) in [
+                    (ID_SYSINFO, "system.info"),
+                    (ID_STATS, "system.stats"),
+                    (ID_ALERTS, "system.alerts"),
+                ] {
+                    let _ = write.send(client::request(id, method, Value::Null)).await;
+                }
             }
         }
     }
@@ -366,8 +541,12 @@ async fn handle_input(app: &mut App, ev: Event, write: &mut WsWrite) {
             app.tab = (app.tab + TABS.len() - 1) % TABS.len();
             app.selected = 0;
         }
-        KeyCode::Char(d @ '1'..='8') => {
+        KeyCode::Char(d @ '1'..='9') => {
             app.tab = (d as usize - '1' as usize).min(TABS.len() - 1);
+            app.selected = 0;
+        }
+        KeyCode::Char('0') => {
+            app.tab = TABS.len() - 1;
             app.selected = 0;
         }
         KeyCode::Down | KeyCode::Char('j') => {
@@ -383,11 +562,12 @@ async fn handle_input(app: &mut App, ev: Event, write: &mut WsWrite) {
             app.status = "refreshing…".to_string();
             refresh_all(app, write).await;
         }
-        KeyCode::Enter => {
-            if app.tab == TAB_PROTOCOLS {
-                toggle_protocol(app, write).await;
-            }
-        }
+        KeyCode::Enter => match app.tab {
+            TAB_PROTOCOLS => toggle_protocol(app, write).await,
+            TAB_ALERTS => toggle_alert_rule(app, write).await,
+            TAB_SYSTEM => edit_system_row(app, write).await,
+            _ => {}
+        },
         KeyCode::Char('n') => open_create_form(app),
         KeyCode::Char('d') => open_delete_confirm(app),
         KeyCode::Char('D') if app.tab == TAB_FILESYSTEMS => open_destroy_confirm(app),
@@ -398,6 +578,8 @@ async fn handle_input(app: &mut App, ev: Event, write: &mut WsWrite) {
             _ => {}
         },
         KeyCode::Char('e') if app.tab == TAB_SHARES => toggle_share_enabled(app, write).await,
+        KeyCode::Char('e') if app.tab == TAB_ALERTS => toggle_alert_rule(app, write).await,
+        KeyCode::Char('e') if app.tab == TAB_SYSTEM => edit_system_row(app, write).await,
         KeyCode::Char('c') if app.tab == TAB_SNAPSHOTS => open_clone_snapshot_form(app),
         KeyCode::Char('w') if app.tab == TAB_DEVICES => open_wipe_confirm(app),
         KeyCode::Char('p') if app.tab == TAB_USERS => open_password_form(app),
@@ -420,15 +602,33 @@ async fn handle_form_key(app: &mut App, code: KeyCode, write: &mut WsWrite) {
             form.focus = (form.focus + form.fields.len() - 1) % form.fields.len()
         }
         KeyCode::Left | KeyCode::Right => {
-            if let Some(field) = form.fields.get_mut(form.focus)
-                && let Some((opts, idx)) = &mut field.options
-            {
-                let n = opts.len().max(1);
-                *idx = if code == KeyCode::Right {
-                    (*idx + 1) % n
-                } else {
-                    (*idx + n - 1) % n
-                };
+            if let Some(field) = form.fields.get_mut(form.focus) {
+                if let Some((opts, idx)) = &mut field.options {
+                    let n = opts.len().max(1);
+                    *idx = if code == KeyCode::Right {
+                        (*idx + 1) % n
+                    } else {
+                        (*idx + n - 1) % n
+                    };
+                } else if let Some((items, cursor)) = &mut field.multi {
+                    let n = items.len().max(1);
+                    *cursor = if code == KeyCode::Right {
+                        (*cursor + 1) % n
+                    } else {
+                        (*cursor + n - 1) % n
+                    };
+                }
+            }
+        }
+        KeyCode::Char(' ') => {
+            if let Some(field) = form.fields.get_mut(form.focus) {
+                if let Some((items, cursor)) = &mut field.multi {
+                    if let Some((_, checked)) = items.get_mut(*cursor) {
+                        *checked = !*checked;
+                    }
+                } else if field.options.is_none() {
+                    field.value.push(' ');
+                }
             }
         }
         KeyCode::Backspace => {
@@ -503,12 +703,12 @@ fn open_create_form(app: &mut App) {
             let free = app.free_device_paths();
             let backends: Vec<String> = vec!["btrfs".into(), "bcachefs".into()];
             Form {
-                title: "new filesystem".into(),
-                hint: format!("free devices: {}", free.join(", ")),
+                title: "new filesystem / pool".into(),
+                hint: "space toggles a device · ◂▸ moves between devices".into(),
                 fields: vec![
                     FormField::select("backend", backends, 0),
                     FormField::text("name", "tank"),
-                    FormField::text("devices", &free.first().cloned().unwrap_or_default()),
+                    FormField::multi("devices", free),
                     FormField::select(
                         "raid",
                         vec![
@@ -524,6 +724,7 @@ fn open_create_form(app: &mut App) {
                         vec!["none".into(), "zstd".into(), "lzo".into(), "lz4".into()],
                         1,
                     ),
+                    FormField::text("replicas (bcachefs)", "1"),
                 ],
                 focus: 1,
                 kind: FormKind::CreateFs,
@@ -552,18 +753,60 @@ fn open_create_form(app: &mut App) {
         },
         TAB_SHARES => Form {
             title: "new share".into(),
-            hint: "path must live under /fs/…".into(),
+            hint: "nfs/smb: dir under /fs · iscsi/nvmeof: a block device path".into(),
             fields: vec![
-                FormField::select("kind", vec!["nfs".into(), "smb".into()], 0),
-                FormField::text("name (smb)", "share"),
-                FormField::text("path", "/fs/"),
-                FormField::text("comment", ""),
+                FormField::select(
+                    "kind",
+                    vec!["nfs".into(), "smb".into(), "iscsi".into(), "nvmeof".into()],
+                    0,
+                ),
+                FormField::text("name", "share"),
+                FormField::text("path / device", "/fs/"),
+                FormField::text("comment (nfs/smb)", ""),
                 FormField::text("clients (nfs)", "*"),
                 FormField::select("read_only", vec!["no".into(), "yes".into()], 0),
                 FormField::select("guest_ok (smb)", vec!["no".into(), "yes".into()], 0),
             ],
             focus: 2,
             kind: FormKind::CreateShare,
+        },
+        TAB_ALERTS => Form {
+            title: "new alert rule".into(),
+            hint: "threshold is a number (percent, °C, GB…)".into(),
+            fields: vec![
+                FormField::text("name", ""),
+                FormField::select(
+                    "metric",
+                    vec![
+                        "fs_usage_percent".into(),
+                        "cpu_load_percent".into(),
+                        "memory_usage_percent".into(),
+                        "swap_usage_percent".into(),
+                        "disk_temperature".into(),
+                        "smart_health".into(),
+                        "root_disk_free_gb".into(),
+                        "boot_disk_free_mb".into(),
+                        "kernel_errors".into(),
+                    ],
+                    0,
+                ),
+                FormField::select(
+                    "condition",
+                    vec!["above".into(), "below".into(), "equals".into()],
+                    0,
+                ),
+                FormField::text("threshold", "90"),
+                FormField::select("severity", vec!["warning".into(), "critical".into()], 0),
+            ],
+            focus: 0,
+            kind: FormKind::CreateAlertRule,
+        },
+        TAB_SYSTEM => Form {
+            title: "add SSH key".into(),
+            hint: "paste a full public key (ssh-ed25519 … / ssh-rsa …)".into(),
+            fields: vec![FormField::text("public key", "")],
+            focus: 0,
+            kind: FormKind::AddSshKey,
         },
         TAB_USERS => match app.users_selection() {
             UsersSelection::Account(_) => Form {
@@ -801,7 +1044,60 @@ fn open_delete_confirm(app: &mut App) {
                     params: json!({"id": id}),
                 }
             }
+            SharesSelection::Iscsi(i) => {
+                let Some(s) = app.iscsi.get(i) else { return };
+                let id = str_of(s, "id");
+                Confirm {
+                    message: format!("delete iSCSI target {} ({id})?", str_of(s, "name")),
+                    type_to_confirm: None,
+                    input: String::new(),
+                    method: "share.iscsi.delete",
+                    params: json!({"id": id}),
+                }
+            }
+            SharesSelection::Nvmeof(i) => {
+                let Some(s) = app.nvmeof.get(i) else { return };
+                let id = str_of(s, "id");
+                Confirm {
+                    message: format!("delete NVMe-oF subsystem {} ({id})?", str_of(s, "name")),
+                    type_to_confirm: None,
+                    input: String::new(),
+                    method: "share.nvmeof.delete",
+                    params: json!({"id": id}),
+                }
+            }
         },
+        TAB_ALERTS => {
+            let Some(rule) = app.alert_rules.get(app.selected) else {
+                return;
+            };
+            let id = str_of(rule, "id");
+            Confirm {
+                message: format!("delete alert rule '{}'?", str_of(rule, "name")),
+                type_to_confirm: None,
+                input: String::new(),
+                method: "alert.rules.delete",
+                params: json!({"id": id}),
+            }
+        }
+        TAB_SYSTEM => {
+            let rows = app.system_rows();
+            let Some(SystemRow {
+                kind: SystemRowKind::SshKey(key),
+                label,
+                ..
+            }) = rows.get(app.selected)
+            else {
+                return;
+            };
+            Confirm {
+                message: format!("remove {label}?"),
+                type_to_confirm: None,
+                input: String::new(),
+                method: "system.ssh.remove_key",
+                params: json!({"key": key}),
+            }
+        }
         TAB_USERS => match app.users_selection() {
             UsersSelection::Account(i) => {
                 let Some(u) = app.users.get(i) else { return };
@@ -879,6 +1175,55 @@ fn open_wipe_confirm(app: &mut App) {
     });
 }
 
+async fn toggle_alert_rule(app: &mut App, write: &mut WsWrite) {
+    let Some(rule) = app.alert_rules.get(app.selected) else {
+        return;
+    };
+    let id = str_of(rule, "id");
+    let enabled = rule
+        .get("enabled")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(true);
+    app.status = format!("{} rule…", if enabled { "disabling" } else { "enabling" });
+    let _ = write
+        .send(client::request(
+            ID_ACTION,
+            "alert.rules.update",
+            json!({"id": id, "enabled": !enabled}),
+        ))
+        .await;
+}
+
+async fn edit_system_row(app: &mut App, write: &mut WsWrite) {
+    let rows = app.system_rows();
+    let Some(row) = rows.get(app.selected) else {
+        return;
+    };
+    match &row.kind {
+        SystemRowKind::Setting(key) => {
+            app.modal = Modal::Form(Form {
+                title: format!("set {}", row.label),
+                hint: String::new(),
+                fields: vec![FormField::text("value", &row.value)],
+                focus: 0,
+                kind: FormKind::EditSetting { key },
+            });
+        }
+        SystemRowKind::SettingToggle(key) => {
+            let current = row.value == "true";
+            app.status = format!("updating {key}…");
+            let _ = write
+                .send(client::request(
+                    ID_ACTION,
+                    "system.settings.update",
+                    json!({ *key: !current }),
+                ))
+                .await;
+        }
+        SystemRowKind::SshKey(_) | SystemRowKind::Info => {}
+    }
+}
+
 // ── direct actions ──────────────────────────────────────────────
 
 async fn mount_toggle(app: &mut App, write: &mut WsWrite) {
@@ -913,6 +1258,10 @@ async fn toggle_share_enabled(app: &mut App, write: &mut WsWrite) {
     let (method, share) = match app.shares_selection() {
         SharesSelection::Nfs(i) => ("share.nfs.update", app.nfs.get(i)),
         SharesSelection::Smb(i) => ("share.smb.update", app.smb.get(i)),
+        SharesSelection::Iscsi(_) | SharesSelection::Nvmeof(_) => {
+            app.status = "iSCSI/NVMe-oF have no enable toggle — delete/create instead".into();
+            return;
+        }
     };
     let Some(share) = share else { return };
     let id = str_of(share, "id");
@@ -1011,33 +1360,50 @@ fn build_request(form: &mut Form) -> Result<(&'static str, Value), String> {
             Ok((method, json!({"group": get(1), "user": get(0)})))
         }
         FormKind::CreateShare => {
-            require(&get(2), "path")?;
-            if get(0) == "nfs" {
-                let host = if get(4).is_empty() {
-                    "*".to_string()
-                } else {
-                    get(4)
-                };
-                Ok((
-                    "share.nfs.create",
-                    json!({
-                        "path": get(2),
-                        "comment": get(3),
-                        "clients": [{"host": host, "options": "rw,sync,no_subtree_check"}],
-                    }),
-                ))
-            } else {
-                require(&get(1), "name")?;
-                Ok((
-                    "share.smb.create",
-                    json!({
-                        "name": get(1),
-                        "path": get(2),
-                        "comment": get(3),
-                        "read_only": get(5) == "yes",
-                        "guest_ok": get(6) == "yes",
-                    }),
-                ))
+            require(&get(2), "path / device")?;
+            match get(0).as_str() {
+                "nfs" => {
+                    let host = if get(4).is_empty() {
+                        "*".to_string()
+                    } else {
+                        get(4)
+                    };
+                    Ok((
+                        "share.nfs.create",
+                        json!({
+                            "path": get(2),
+                            "comment": get(3),
+                            "clients": [{"host": host, "options": "rw,sync,no_subtree_check"}],
+                        }),
+                    ))
+                }
+                "smb" => {
+                    require(&get(1), "name")?;
+                    Ok((
+                        "share.smb.create",
+                        json!({
+                            "name": get(1),
+                            "path": get(2),
+                            "comment": get(3),
+                            "read_only": get(5) == "yes",
+                            "guest_ok": get(6) == "yes",
+                        }),
+                    ))
+                }
+                "iscsi" => {
+                    require(&get(1), "name")?;
+                    Ok((
+                        "share.iscsi.create",
+                        json!({"name": get(1), "device_path": get(2)}),
+                    ))
+                }
+                _ => {
+                    require(&get(1), "name")?;
+                    Ok((
+                        "share.nvmeof.create",
+                        json!({"name": get(1), "device_path": get(2)}),
+                    ))
+                }
             }
         }
         FormKind::CreateFs => {
@@ -1048,7 +1414,7 @@ fn build_request(form: &mut Form) -> Result<(&'static str, Value), String> {
                 .filter(|s| !s.is_empty())
                 .collect();
             if devices.is_empty() {
-                return Err("at least one device is required".into());
+                return Err("select at least one device (space toggles)".into());
             }
             let compression = match get(4).as_str() {
                 "none" => None,
@@ -1066,12 +1432,14 @@ fn build_request(form: &mut Form) -> Result<(&'static str, Value), String> {
                     }),
                 ))
             } else {
+                let replicas: u32 = get(5).parse().unwrap_or(1).max(1);
                 let specs: Vec<Value> = devices.iter().map(|d| json!({"path": d})).collect();
                 Ok((
                     "fs.create",
                     json!({
                         "name": get(1),
                         "devices": specs,
+                        "replicas": replicas,
                         "compression": compression,
                     }),
                 ))
@@ -1116,6 +1484,31 @@ fn build_request(form: &mut Form) -> Result<(&'static str, Value), String> {
                     "new_name": get(0),
                 }),
             ))
+        }
+        FormKind::CreateAlertRule => {
+            require(&get(0), "name")?;
+            let threshold: f64 = get(3)
+                .parse()
+                .map_err(|_| "threshold must be a number".to_string())?;
+            Ok((
+                "alert.rules.create",
+                json!({
+                    "name": get(0),
+                    "metric": get(1),
+                    "condition": get(2),
+                    "threshold": threshold,
+                    "severity": get(4),
+                    "enabled": true,
+                }),
+            ))
+        }
+        FormKind::AddSshKey => {
+            require(&get(0), "public key")?;
+            Ok(("system.ssh.add_key", json!({"key": get(0)})))
+        }
+        FormKind::EditSetting { key } => {
+            require(&get(0), "value")?;
+            Ok(("system.settings.update", json!({ *key: get(0) })))
         }
     }
 }
@@ -1178,6 +1571,46 @@ async fn store_response(app: &mut App, id: i64, val: Value, write: &mut WsWrite)
         ID_USERS => app.users = as_array(val),
         ID_SMB_USERS => app.smb_users = as_array(val),
         ID_SMB_GROUPS => app.smb_groups = as_array(val),
+        ID_ISCSI => app.iscsi = as_array(val),
+        ID_NVMEOF => app.nvmeof = as_array(val),
+        ID_ALERT_RULES => app.alert_rules = as_array(val),
+        ID_ALERTS => app.alerts = as_array(val),
+        ID_SETTINGS => app.settings = Some(val),
+        ID_SSH => app.ssh = Some(val),
+        ID_STATS => {
+            // Derive sparkline points: CPU = load1 as % of cores,
+            // memory = used as % of total.
+            let cores = val
+                .pointer("/cpu/count")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(1)
+                .max(1) as f64;
+            let load = val
+                .pointer("/cpu/load_1")
+                .and_then(|v| v.as_f64())
+                .unwrap_or(0.0);
+            app.cpu_history
+                .push(((load / cores) * 100.0).clamp(0.0, 100.0) as u64);
+            let total = val
+                .pointer("/memory/total_bytes")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(1)
+                .max(1) as f64;
+            let used = val
+                .pointer("/memory/used_bytes")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(0) as f64;
+            app.mem_history
+                .push(((used / total) * 100.0).clamp(0.0, 100.0) as u64);
+            let cap = 120;
+            if app.cpu_history.len() > cap {
+                app.cpu_history.remove(0);
+            }
+            if app.mem_history.len() > cap {
+                app.mem_history.remove(0);
+            }
+            app.stats = Some(val);
+        }
         ID_ACTION => {
             app.status = "✓ done".to_string();
             // Auth/SMB-account mutations broadcast no event; refresh all.
@@ -1245,6 +1678,13 @@ async fn refresh_all(app: &mut App, write: &mut WsWrite) {
         (ID_PROTO, "service.protocol.list"),
         (ID_SMB_USERS, "smb.user.list"),
         (ID_SMB_GROUPS, "smb.group.list"),
+        (ID_ISCSI, "share.iscsi.list"),
+        (ID_NVMEOF, "share.nvmeof.list"),
+        (ID_ALERT_RULES, "alert.rules.list"),
+        (ID_SETTINGS, "system.settings.get"),
+        (ID_SSH, "system.ssh.status"),
+        (ID_STATS, "system.stats"),
+        (ID_ALERTS, "system.alerts"),
     ] {
         let _ = write.send(client::request(id, method, Value::Null)).await;
     }
@@ -1263,6 +1703,8 @@ async fn refresh_collection(app: &mut App, collection: &str, write: &mut WsWrite
         "snapshot" => &[(ID_FS, "fs.list")], // re-fans-out snapshot queries
         "share.nfs" => &[(ID_NFS, "share.nfs.list")],
         "share.smb" => &[(ID_SMB, "share.smb.list")],
+        "share.iscsi" => &[(ID_ISCSI, "share.iscsi.list")],
+        "share.nvmeof" => &[(ID_NVMEOF, "share.nvmeof.list")],
         "protocol" => &[(ID_PROTO, "service.protocol.list")],
         _ => &[],
     };
@@ -1306,6 +1748,7 @@ mod tests {
                     value: f.value.clone(),
                     secret: f.secret,
                     options: f.options.clone(),
+                    multi: f.multi.clone(),
                 })
                 .collect(),
             title: form.title.clone(),
@@ -1336,6 +1779,11 @@ mod tests {
         let Modal::Form(mut form) = std::mem::replace(&mut app.modal, Modal::None) else {
             panic!("expected form");
         };
+        // The device multi-select starts unchecked: submitting is refused.
+        assert!(build_request(&mut form).is_err());
+        if let Some((items, _)) = &mut form.fields[2].multi {
+            items[0].1 = true; // space-toggle the first device
+        }
         let (method, params) = build_request(&mut form).expect("build");
         assert_eq!(method, "fs.create");
         assert_eq!(params["backend"], "btrfs");

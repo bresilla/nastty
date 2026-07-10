@@ -5,13 +5,13 @@ use ratatui::Frame;
 use ratatui::layout::{Alignment, Constraint, Flex, Layout, Rect};
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span, Text};
-use ratatui::widgets::{Cell, Clear, Paragraph, Row, Table, TableState, Tabs};
+use ratatui::widgets::{Cell, Clear, Gauge, Paragraph, Row, Sparkline, Table, TableState, Tabs};
 use serde_json::Value;
 
 use super::app::{App, Confirm, Form, Modal, TABS, UsersSelection};
 use super::theme;
 
-const TAB_ICONS: [&str; 8] = ["⌂", "⛁", "▤", "▦", "◷", "⇄", "☰", "◉"];
+const TAB_ICONS: [&str; 10] = ["⌂", "⛁", "▤", "▦", "◷", "⇄", "☰", "◉", "◍", "⚙"];
 
 pub(super) fn render_app(f: &mut Frame, app: &App) {
     let chunks = Layout::vertical([Constraint::Length(3), Constraint::Min(0)]).split(f.area());
@@ -25,6 +25,8 @@ pub(super) fn render_app(f: &mut Frame, app: &App) {
         5 => render_shares(f, chunks[1], app),
         6 => render_protocols(f, chunks[1], app),
         7 => render_users(f, chunks[1], app),
+        8 => render_alerts(f, chunks[1], app),
+        9 => render_system(f, chunks[1], app),
         _ => render_overview(f, chunks[1], app),
     }
     match &app.modal {
@@ -92,11 +94,196 @@ fn render_tabs(f: &mut Frame, area: Rect, app: &App) {
 // ── overview ────────────────────────────────────────────────────
 
 fn render_overview(f: &mut Frame, area: Rect, app: &App) {
+    // Active alerts get a banner strip above everything else.
+    let (banner_h, body) = if app.alerts.is_empty() {
+        (0, area)
+    } else {
+        let [banner, body] =
+            Layout::vertical([Constraint::Length(3), Constraint::Min(0)]).areas(area);
+        render_alert_banner(f, banner, app);
+        (3, body)
+    };
+    let _ = banner_h;
+
     let [left, right] =
-        Layout::horizontal([Constraint::Percentage(55), Constraint::Percentage(45)]).areas(area);
+        Layout::horizontal([Constraint::Percentage(45), Constraint::Percentage(55)]).areas(body);
 
     render_system_card(f, left, app);
-    render_stat_tiles(f, right, app);
+
+    let [meters, tiles] =
+        Layout::vertical([Constraint::Length(12), Constraint::Min(8)]).areas(right);
+    render_meters(f, meters, app);
+    render_stat_tiles(f, tiles, app);
+}
+
+fn render_alert_banner(f: &mut Frame, area: Rect, app: &App) {
+    let critical = app
+        .alerts
+        .iter()
+        .any(|a| field(a, "severity") == "critical");
+    let color = if critical { theme::RED } else { theme::YELLOW };
+    let text = app
+        .alerts
+        .iter()
+        .take(3)
+        .map(|a| any(a, &["message", "name"]))
+        .collect::<Vec<_>>()
+        .join("  ·  ");
+    let block = theme::panel_bare().border_style(Style::default().fg(color));
+    f.render_widget(
+        Paragraph::new(Span::styled(
+            format!("⚠ {} alert(s): {text}", app.alerts.len()),
+            Style::default().fg(color).add_modifier(Modifier::BOLD),
+        ))
+        .block(block),
+        area,
+    );
+}
+
+/// Live meters: CPU + memory gauges with sparkline history, and one
+/// usage gauge per filesystem.
+fn render_meters(f: &mut Frame, area: Rect, app: &App) {
+    let block = theme::panel("live");
+    let inner = block.inner(area);
+    f.render_widget(block, area);
+
+    if app.stats.is_none() {
+        let [center] = Layout::vertical([Constraint::Length(2)])
+            .flex(Flex::Center)
+            .areas(inner);
+        f.render_widget(
+            Paragraph::new(Span::styled(
+                "metrics unavailable — start the nasty-metrics daemon (make metrics)",
+                theme::dim(),
+            ))
+            .alignment(Alignment::Center),
+            center,
+        );
+        return;
+    }
+
+    let stats = app.stats.clone().unwrap_or(Value::Null);
+    let cores = stats
+        .pointer("/cpu/count")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(1)
+        .max(1) as f64;
+    let load1 = stats
+        .pointer("/cpu/load_1")
+        .and_then(|v| v.as_f64())
+        .unwrap_or(0.0);
+    let cpu_pct = ((load1 / cores) * 100.0).clamp(0.0, 100.0);
+    let mem_total = stats
+        .pointer("/memory/total_bytes")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(1)
+        .max(1);
+    let mem_used = stats
+        .pointer("/memory/used_bytes")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(0);
+    let mem_pct = (mem_used as f64 / mem_total as f64 * 100.0).clamp(0.0, 100.0);
+    let temp = stats
+        .pointer("/cpu/temp_c")
+        .and_then(|v| v.as_i64())
+        .map(|t| format!(" · {t}°C"))
+        .unwrap_or_default();
+
+    let mut rows = vec![
+        Constraint::Length(1), // cpu gauge
+        Constraint::Length(1), // cpu sparkline
+        Constraint::Length(1), // mem gauge
+        Constraint::Length(1), // mem sparkline
+        Constraint::Length(1), // spacer
+    ];
+    let fs_count = app.filesystems.len().min(4);
+    rows.extend(vec![Constraint::Length(1); fs_count]);
+    rows.push(Constraint::Min(0));
+    let slots = Layout::vertical(rows).split(inner);
+
+    gauge_line(
+        f,
+        slots[0],
+        &format!("cpu  load {load1:.1}/{cores:.0}{temp}"),
+        cpu_pct,
+        theme::BLUE,
+    );
+    f.render_widget(
+        Sparkline::default()
+            .data(&app.cpu_history)
+            .max(100)
+            .style(Style::default().fg(theme::BLUE)),
+        slots[1].inner(ratatui::layout::Margin::new(2, 0)),
+    );
+    gauge_line(
+        f,
+        slots[2],
+        &format!(
+            "mem  {} / {}",
+            human_bytes(mem_used),
+            human_bytes(mem_total)
+        ),
+        mem_pct,
+        theme::MAUVE,
+    );
+    f.render_widget(
+        Sparkline::default()
+            .data(&app.mem_history)
+            .max(100)
+            .style(Style::default().fg(theme::MAUVE)),
+        slots[3].inner(ratatui::layout::Margin::new(2, 0)),
+    );
+
+    for (i, fs) in app.filesystems.iter().take(fs_count).enumerate() {
+        let total = fs.get("total_bytes").and_then(|v| v.as_u64()).unwrap_or(0);
+        let used = fs.get("used_bytes").and_then(|v| v.as_u64()).unwrap_or(0);
+        let pct = if total > 0 {
+            (used as f64 / total as f64 * 100.0).clamp(0.0, 100.0)
+        } else {
+            0.0
+        };
+        let color = if pct > 90.0 {
+            theme::RED
+        } else if pct > 75.0 {
+            theme::YELLOW
+        } else {
+            theme::GREEN
+        };
+        gauge_line(
+            f,
+            slots[5 + i],
+            &format!(
+                "{}  {} / {}",
+                field(fs, "name"),
+                human_bytes(used),
+                human_bytes(total)
+            ),
+            pct,
+            color,
+        );
+    }
+}
+
+fn gauge_line(f: &mut Frame, area: Rect, label: &str, pct: f64, color: ratatui::style::Color) {
+    let [name, bar] = Layout::horizontal([Constraint::Length(30), Constraint::Min(10)]).areas(area);
+    f.render_widget(
+        Paragraph::new(Span::styled(format!(" {label}"), theme::subtle())),
+        name,
+    );
+    f.render_widget(
+        Gauge::default()
+            .gauge_style(Style::default().fg(color).bg(theme::SURFACE_LO))
+            .ratio(pct / 100.0)
+            .label(Span::styled(
+                format!("{pct:.0}%"),
+                Style::default().fg(theme::TEXT),
+            )),
+        bar,
+    );
+}
+
+fn human_bytes(n: u64) -> String {
+    bytes_to_human(n)
 }
 
 fn render_system_card(f: &mut Frame, area: Rect, app: &App) {
@@ -407,28 +594,47 @@ fn render_subvolumes(f: &mut Frame, area: Rect, app: &App) {
 }
 
 fn render_shares(f: &mut Frame, area: Rect, app: &App) {
-    let halves =
-        Layout::vertical([Constraint::Percentage(50), Constraint::Percentage(50)]).split(area);
+    // 2×2 grid: NFS | SMB / iSCSI | NVMe-oF. One selection runs across
+    // all four sections in order; each quadrant highlights its own slice.
+    let [top, bottom] =
+        Layout::vertical([Constraint::Percentage(50), Constraint::Percentage(50)]).areas(area);
+    let [nfs_a, smb_a] =
+        Layout::horizontal([Constraint::Percentage(50), Constraint::Percentage(50)]).areas(top);
+    let [iscsi_a, nvme_a] =
+        Layout::horizontal([Constraint::Percentage(50), Constraint::Percentage(50)]).areas(bottom);
+
+    let sel = app.selected;
+    let nfs_end = app.nfs.len();
+    let smb_end = nfs_end + app.smb.len();
+    let iscsi_end = smb_end + app.iscsi.len();
+    let sel_in = |lo: usize, hi: usize| {
+        if sel >= lo && sel < hi {
+            sel - lo
+        } else {
+            usize::MAX
+        }
+    };
 
     let nfs_rows: Vec<Row> = app
         .nfs
         .iter()
         .map(|s| {
-            Row::new(vec![cell2(
-                primary(field(s, "path")),
-                secondary(field(s, "id")),
-            )])
+            let enabled = s.get("enabled").and_then(|v| v.as_bool()).unwrap_or(true);
+            Row::new(vec![
+                cell2(primary(field(s, "path")), secondary(field(s, "id"))),
+                cell1(theme::badge(enabled, "on", "off")),
+            ])
             .height(2)
         })
         .collect();
     render_table(
         f,
-        halves[0],
-        &format!("nfs shares ({})", app.nfs.len()),
-        &["export"],
-        &[Constraint::Min(30)],
+        nfs_a,
+        &format!("nfs ({})", app.nfs.len()),
+        &["export", "state"],
+        &[Constraint::Min(20), Constraint::Length(8)],
         nfs_rows,
-        usize::MAX, // no selection on shares view
+        sel_in(0, nfs_end),
         "no NFS shares",
     );
 
@@ -436,22 +642,85 @@ fn render_shares(f: &mut Frame, area: Rect, app: &App) {
         .smb
         .iter()
         .map(|s| {
+            let enabled = s.get("enabled").and_then(|v| v.as_bool()).unwrap_or(true);
             Row::new(vec![
-                cell2(primary(any(s, &["name"])), secondary(field(s, "id"))),
-                cell1(Span::styled(field(s, "path"), theme::subtle())),
+                cell2(primary(any(s, &["name"])), secondary(field(s, "path"))),
+                cell1(theme::badge(enabled, "on", "off")),
             ])
             .height(2)
         })
         .collect();
     render_table(
         f,
-        halves[1],
-        &format!("smb shares ({})", app.smb.len()),
-        &["share", "path"],
-        &[Constraint::Length(28), Constraint::Min(24)],
+        smb_a,
+        &format!("smb ({})", app.smb.len()),
+        &["share", "state"],
+        &[Constraint::Min(20), Constraint::Length(8)],
         smb_rows,
-        usize::MAX,
+        sel_in(nfs_end, smb_end),
         "no SMB shares",
+    );
+
+    let iscsi_rows: Vec<Row> = app
+        .iscsi
+        .iter()
+        .map(|t| {
+            Row::new(vec![
+                cell2(primary(field(t, "name")), secondary(field(t, "iqn"))),
+                cell1(Span::styled(
+                    format!(
+                        "{} lun(s)",
+                        t.get("luns")
+                            .and_then(|v| v.as_array())
+                            .map(Vec::len)
+                            .unwrap_or(0)
+                    ),
+                    theme::subtle(),
+                )),
+            ])
+            .height(2)
+        })
+        .collect();
+    render_table(
+        f,
+        iscsi_a,
+        &format!("iscsi targets ({})", app.iscsi.len()),
+        &["target", "luns"],
+        &[Constraint::Min(20), Constraint::Length(10)],
+        iscsi_rows,
+        sel_in(smb_end, iscsi_end),
+        "no iSCSI targets",
+    );
+
+    let nvme_rows: Vec<Row> = app
+        .nvmeof
+        .iter()
+        .map(|s| {
+            Row::new(vec![
+                cell2(primary(field(s, "name")), secondary(field(s, "nqn"))),
+                cell1(Span::styled(
+                    format!(
+                        "{} ns",
+                        s.get("namespaces")
+                            .and_then(|v| v.as_array())
+                            .map(Vec::len)
+                            .unwrap_or(0)
+                    ),
+                    theme::subtle(),
+                )),
+            ])
+            .height(2)
+        })
+        .collect();
+    render_table(
+        f,
+        nvme_a,
+        &format!("nvme-of ({})", app.nvmeof.len()),
+        &["subsystem", "ns"],
+        &[Constraint::Min(20), Constraint::Length(8)],
+        nvme_rows,
+        sel_in(iscsi_end, iscsi_end + app.nvmeof.len()),
+        "no NVMe-oF subsystems",
     );
 }
 
@@ -609,6 +878,118 @@ fn render_users(f: &mut Frame, area: Rect, app: &App) {
         rows,
         app.selected,
         "no user data (admin required for accounts)",
+    );
+}
+
+fn render_alerts(f: &mut Frame, area: Rect, app: &App) {
+    // Active alerts on top (when any), rules table below.
+    let (active_area, rules_area) = if app.alerts.is_empty() {
+        (None, area)
+    } else {
+        let h = (app.alerts.len().min(4) + 2) as u16;
+        let [a, r] = Layout::vertical([Constraint::Length(h), Constraint::Min(6)]).areas(area);
+        (Some(a), r)
+    };
+    if let Some(a) = active_area {
+        let lines: Vec<Line> = app
+            .alerts
+            .iter()
+            .take(4)
+            .map(|al| {
+                let sev = field(al, "severity");
+                let color = if sev == "critical" {
+                    theme::RED
+                } else {
+                    theme::YELLOW
+                };
+                Line::from(vec![
+                    Span::styled(format!(" ● {sev:<9}"), Style::default().fg(color)),
+                    Span::styled(any(al, &["message", "name"]), theme::text()),
+                ])
+            })
+            .collect();
+        f.render_widget(
+            Paragraph::new(lines)
+                .block(theme::panel("active alerts").border_style(Style::default().fg(theme::RED))),
+            a,
+        );
+    }
+
+    let rows: Vec<Row> = app
+        .alert_rules
+        .iter()
+        .map(|r| {
+            let enabled = r.get("enabled").and_then(|v| v.as_bool()).unwrap_or(false);
+            let sev = field(r, "severity");
+            Row::new(vec![
+                cell2(
+                    primary(field(r, "name")),
+                    secondary(format!(
+                        "{} {} {}",
+                        field(r, "metric"),
+                        field(r, "condition"),
+                        field(r, "threshold")
+                    )),
+                ),
+                cell1(Span::styled(
+                    sev.clone(),
+                    Style::default().fg(if sev == "critical" {
+                        theme::RED
+                    } else {
+                        theme::YELLOW
+                    }),
+                )),
+                cell1(theme::badge(enabled, "enabled", "disabled")),
+            ])
+            .height(2)
+        })
+        .collect();
+    render_table(
+        f,
+        rules_area,
+        &format!(
+            "alert rules ({}) — n new · ↵/e toggle · d delete",
+            app.alert_rules.len()
+        ),
+        &["rule", "severity", "state"],
+        &[
+            Constraint::Min(34),
+            Constraint::Length(12),
+            Constraint::Length(14),
+        ],
+        rows,
+        app.selected,
+        "no alert rules",
+    );
+}
+
+fn render_system(f: &mut Frame, area: Rect, app: &App) {
+    let rows_data = app.system_rows();
+    let rows: Vec<Row> = rows_data
+        .iter()
+        .map(|r| {
+            let kind = match r.kind {
+                super::app::SystemRowKind::Setting(_)
+                | super::app::SystemRowKind::SettingToggle(_) => "setting",
+                super::app::SystemRowKind::SshKey(_) => "ssh",
+                super::app::SystemRowKind::Info => "info",
+            };
+            Row::new(vec![
+                cell2(primary(r.label.clone()), secondary(kind.to_string())),
+                cell1(Span::styled(r.value.clone(), theme::subtle())),
+            ])
+            .height(2)
+        })
+        .collect();
+    render_table(
+        f,
+        area,
+        "system — ↵/e edit · n add ssh key · d remove key",
+        &["item", "value"],
+        &[Constraint::Min(28), Constraint::Min(24)],
+        rows,
+        app.selected,
+        "no system data yet",
     );
 }
 
@@ -1072,9 +1453,38 @@ mod tests {
         app.snapshots = vec![serde_json::json!({
             "name":"data@daily","filesystem":"tank","subvolume":"data","backend":"btrfs"
         })];
+        app.stats = Some(serde_json::json!({
+            "cpu": {"count": 24, "load_1": 3.6, "load_5": 2.0, "load_15": 1.2, "temp_c": 44},
+            "memory": {"total_bytes": 67108864000u64, "used_bytes": 21474836480u64},
+        }));
+        app.cpu_history = vec![5, 8, 12, 20, 15, 30, 25, 40, 35, 20, 18, 22, 30, 15];
+        app.mem_history = vec![30, 31, 32, 32, 33, 31, 30, 32, 34, 33, 32, 31, 32, 32];
+        app.filesystems = vec![serde_json::json!({
+            "name":"tank","backend":"btrfs","mounted":true,"mount_point":"/fs/tank",
+            "total_bytes":4000000000000u64,"used_bytes":3350000000000u64
+        })];
+        app.alerts = vec![serde_json::json!({
+            "severity":"warning","message":"Filesystem tank at 84% capacity","name":"fs-usage-warn"
+        })];
+        app.alert_rules = vec![
+            serde_json::json!({"id":"r1","name":"Filesystem usage warning","metric":"fs_usage_percent",
+                "condition":"above","threshold":80.0,"severity":"warning","enabled":true}),
+            serde_json::json!({"id":"r2","name":"Disk temperature critical","metric":"disk_temperature",
+                "condition":"above","threshold":60.0,"severity":"critical","enabled":false}),
+        ];
+        app.settings = Some(serde_json::json!({
+            "hostname":"tron","timezone":"UTC","clock_24h":true,"temp_unit":"celsius"
+        }));
+        app.ssh = Some(serde_json::json!({
+            "password_auth": false,
+            "keys": ["ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIF7 kush@tron"]
+        }));
+        app.iscsi = vec![serde_json::json!({
+            "id":"t1","name":"backupdisk","iqn":"iqn.2137-04.storage.nasty:backupdisk","luns":[{}]
+        })];
         app.selected = 1;
 
-        for tab in [0usize, 1, 4, 6, 7] {
+        for tab in [0usize, 1, 4, 5, 6, 7, 8, 9] {
             app.tab = tab;
             let mut terminal = Terminal::new(TestBackend::new(110, 26)).unwrap();
             terminal.draw(|f| render_app(f, &app)).unwrap();
