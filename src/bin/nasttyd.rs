@@ -28,8 +28,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let state = Arc::new(AppState::new().await);
 
     // Startup restore — trimmed version of the upstream engine's boot
-    // sequence. Every phase is non-fatal: a fresh box with an empty state
-    // dir sails through all of them.
+    // sequence. Every phase is non-fatal. It runs in the background so the
+    // server binds immediately (each phase shells out and can be slow);
+    // read-only queries work during restore, and each service is internally
+    // synchronised.
+    tokio::spawn(restore(state.clone()));
+
+    nastty::server::serve(config.listen, state).await?;
+    Ok(())
+}
+
+async fn restore(state: Arc<AppState>) {
     let failures = state.filesystems.restore_mounts().await;
     for f in &failures {
         warn!("mount restore failed: {f}");
@@ -42,7 +51,5 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     if let Err(e) = state.smb.ensure_config_scaffolding().await {
         warn!("smb config scaffolding failed (samba not set up?): {e}");
     }
-
-    nastty::server::serve(config.listen, state).await?;
-    Ok(())
+    info!("startup restore complete");
 }

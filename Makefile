@@ -17,7 +17,7 @@ $(info ------------------------------------------)
 $(info Project: $(PROJECT_NAME) v$(PROJECT_VERSION))
 $(info ------------------------------------------)
 
-.PHONY: build b compile c run r serve test t check check-all test-all clippy rustdoc fmt fmt-check clean verify release help h
+.PHONY: build b compile c run r serve tui test t check check-all test-all clippy rustdoc fmt fmt-check clean verify release help h
 
 build:
 	@$(CARGO) build --lib
@@ -37,6 +37,9 @@ r: run
 
 serve:
 	@$(CARGO) run --bin nasttyd
+
+tui:
+	@$(CARGO) run --bin nastty
 
 test:
 	@$(CARGO) test --all-targets
@@ -89,6 +92,7 @@ help:
 	@echo "  compile      Clean and rebuild"
 	@echo "  run          Run a development example"
 	@echo "  serve        Run the nasttyd API daemon"
+	@echo "  tui          Run the nastty terminal UI"
 	@echo "  test         Run all tests"
 	@echo "  check        Run cargo check on all targets"
 	@echo "  check-all    Run cargo check on all targets/all features"

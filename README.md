@@ -1,18 +1,22 @@
 # nastty
 
-Thin local NAS API server built on the upstream
-[nasty](https://github.com/nasty-project/nasty) crates.
+A local NAS built on the upstream [nasty](https://github.com/nasty-project/nasty)
+crates: a small API server (`nasttyd`) and a terminal UI (`nastty`).
 
 All the heavy lifting — bcachefs filesystems, subvolumes, snapshots,
 NFS/SMB/iSCSI/NVMe-oF sharing, protocol lifecycle — comes from the upstream
-`nasty-*` library crates, consumed as pinned git dependencies. This crate owns
-only the server shell:
+`nasty-*` library crates, consumed as pinned git dependencies. This repo owns
+only two thin pieces:
 
-- username/password sessions (cookie + bearer token)
-- JSON-RPC 2.0 over WebSocket at `/ws`, with change events pushed to clients
-- REST gateway: `/api/v1/<domain>/<method>` → `<domain>.<method>`
-- upstream-compatible method names (`fs.list`, `device.list`,
-  `share.nfs.create`, `service.protocol.enable`, ...)
+- **`nasttyd`** — the server shell:
+  - username/password sessions (cookie + bearer token)
+  - JSON-RPC 2.0 over WebSocket at `/ws`, with change events pushed to clients
+  - REST gateway: `/api/v1/<domain>/<method>` → `<domain>.<method>`
+  - upstream-compatible method names (`fs.list`, `device.list`,
+    `share.nfs.create`, `service.protocol.enable`, ...)
+- **`nastty`** — a [ratatui](https://ratatui.rs) terminal client that logs in,
+  speaks the same JSON-RPC over the WebSocket, shows live NAS state in tabs, and
+  refreshes automatically on server events.
 
 Not wired (by construction, nothing to strip): VMs, Docker apps, backup,
 firmware, Tailscale, OIDC/WebAuthn, web terminal, guest shares, firewall
@@ -87,6 +91,31 @@ connected socket, so clients refresh only the affected collection:
 Collections: `filesystem`, `subvolume`, `snapshot`, `share.nfs`,
 `share.smb`, `share.iscsi`, `share.nvmeof`, `protocol`.
 
+## Terminal UI
+
+With `nasttyd` running, start the TUI:
+
+```sh
+make tui                   # cargo run --bin nastty
+# or
+nastty --server http://127.0.0.1:2137 --user admin
+```
+
+It shows a login screen (and a forced password-change screen on first run),
+then a tabbed live view:
+
+- **Overview** — host, kernel, uptime, engine/bcachefs versions
+- **Devices** — block devices (`device.list`)
+- **Filesystems** — bcachefs filesystems and mount state
+- **Subvolumes** — all subvolumes across filesystems
+- **Shares** — NFS and SMB shares
+- **Protocols** — enable/disable NFS/SMB/iSCSI/NVMe-oF/SSH/mDNS/... with Enter
+
+Keys: `1`–`6` jump to a tab, `←`/`→` cycle tabs, `↑`/`↓` (or `j`/`k`) move the
+selection, `Enter` toggles the selected protocol, `r` refreshes, `q` quits. The
+view refreshes itself when the server pushes an event, so changes made from
+another client show up live.
+
 ## Updating to latest upstream
 
 The `nasty-*` dependencies are pinned to one upstream commit in
@@ -105,5 +134,6 @@ The `nasty-*` dependencies are pinned to one upstream commit in
 make build      # build the library
 make test       # run tests
 make verify     # fmt-check + check + tests + clippy + rustdoc
-make serve      # run the daemon
+make serve      # run the daemon (nasttyd)
+make tui        # run the terminal UI (nastty)
 ```

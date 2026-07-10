@@ -14,6 +14,10 @@ path = "src/lib.rs"
 name = "nasttyd"
 path = "src/bin/nasttyd.rs"
 
+[[bin]]
+name = "nastty"
+path = "src/bin/nastty.rs"
+
 [dependencies]
 nasty-common = { git = "https://github.com/nasty-project/nasty", rev = "4ad3fa304b57b8ce82774a36693aa87769d1478b" }
 nasty-storage = { git = "https://github.com/nasty-project/nasty", rev = "4ad3fa304b57b8ce82774a36693aa87769d1478b" }
@@ -31,5 +35,10 @@ argon2 = "0.5"
 rand = "0.10"
 futures-util = "0.3"
 uuid = { version = "1", features = ["v4"] }
+
+# TUI client (nastty binary)
+ratatui = "0.29"
+tokio-tungstenite = "0.26"
+reqwest = { version = "0.13", default-features = false, features = ["json", "rustls"] }
 
 [dev-dependencies]

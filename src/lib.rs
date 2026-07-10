@@ -5,11 +5,13 @@
 //! shell: auth, JSON-RPC over WebSocket, a REST gateway, and the event bus.
 
 pub mod auth;
+pub mod client;
 pub mod config;
 pub mod rest;
 pub mod rpc;
 pub mod server;
 pub mod state;
+pub mod tui;
 pub mod ws;
 
 /// Returns this crate's display name.
