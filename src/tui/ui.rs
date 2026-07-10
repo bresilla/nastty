@@ -8,10 +8,10 @@ use ratatui::text::{Line, Span, Text};
 use ratatui::widgets::{Cell, Clear, Paragraph, Row, Table, TableState, Tabs};
 use serde_json::Value;
 
-use super::app::{App, TABS};
+use super::app::{App, Confirm, Form, Modal, TABS, UsersSelection};
 use super::theme;
 
-const TAB_ICONS: [&str; 6] = ["⌂", "⛁", "▤", "▦", "⇄", "☰"];
+const TAB_ICONS: [&str; 8] = ["⌂", "⛁", "▤", "▦", "◷", "⇄", "☰", "◉"];
 
 pub(super) fn render_app(f: &mut Frame, app: &App) {
     let chunks = Layout::vertical([Constraint::Length(3), Constraint::Min(0)]).split(f.area());
@@ -21,12 +21,20 @@ pub(super) fn render_app(f: &mut Frame, app: &App) {
         1 => render_devices(f, chunks[1], app),
         2 => render_filesystems(f, chunks[1], app),
         3 => render_subvolumes(f, chunks[1], app),
-        4 => render_shares(f, chunks[1], app),
-        5 => render_protocols(f, chunks[1], app),
+        4 => render_snapshots(f, chunks[1], app),
+        5 => render_shares(f, chunks[1], app),
+        6 => render_protocols(f, chunks[1], app),
+        7 => render_users(f, chunks[1], app),
         _ => render_overview(f, chunks[1], app),
     }
-    if app.show_help {
-        render_help_popup(f, f.area());
+    match &app.modal {
+        Modal::Form(form) => render_form(f, f.area(), form),
+        Modal::Confirm(confirm) => render_confirm(f, f.area(), confirm),
+        Modal::None => {
+            if app.show_help {
+                render_help_popup(f, f.area());
+            }
+        }
     }
 }
 
@@ -481,6 +489,262 @@ fn render_protocols(f: &mut Frame, area: Rect, app: &App) {
     );
 }
 
+fn render_snapshots(f: &mut Frame, area: Rect, app: &App) {
+    let rows: Vec<Row> = app
+        .snapshots
+        .iter()
+        .map(|s| {
+            Row::new(vec![
+                cell2(
+                    primary(field(s, "name")),
+                    secondary(format!("on {}", field(s, "filesystem"))),
+                ),
+                cell1(Span::styled(
+                    any(s, &["subvolume"]),
+                    Style::default().fg(theme::BLUE),
+                )),
+                cell1(Span::styled(field(s, "backend"), theme::dim())),
+            ])
+            .height(2)
+        })
+        .collect();
+    render_table(
+        f,
+        area,
+        &format!(
+            "snapshots ({}) — n new · c clone · d delete",
+            app.snapshots.len()
+        ),
+        &["snapshot", "subvolume", "backend"],
+        &[
+            Constraint::Min(30),
+            Constraint::Length(20),
+            Constraint::Length(10),
+        ],
+        rows,
+        app.selected,
+        "no snapshots — take one from the Subvolumes tab with s",
+    );
+}
+
+fn render_users(f: &mut Frame, area: Rect, app: &App) {
+    // One selectable list spanning three sections; rows carry a section
+    // label in the second column so the flat list stays readable.
+    let mut rows: Vec<Row> = Vec::new();
+    for u in &app.users {
+        let role = field(u, "role");
+        let must = u
+            .get("must_change_password")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+        rows.push(
+            Row::new(vec![
+                cell2(
+                    primary(field(u, "username")),
+                    secondary(if must {
+                        "must change password".to_string()
+                    } else {
+                        "account".to_string()
+                    }),
+                ),
+                cell1(Span::styled("account", theme::dim())),
+                cell1(Span::styled(
+                    role.clone(),
+                    Style::default().fg(match role.as_str() {
+                        "admin" => theme::MAUVE,
+                        "operator" => theme::BLUE,
+                        _ => theme::SUBTEXT,
+                    }),
+                )),
+            ])
+            .height(2),
+        );
+    }
+    for u in &app.smb_users {
+        rows.push(
+            Row::new(vec![
+                cell2(primary(field(u, "username")), secondary("smb user".into())),
+                cell1(Span::styled("smb", theme::dim())),
+                cell1(Span::styled(
+                    any(u, &["groups"]),
+                    Style::default().fg(theme::SUBTEXT),
+                )),
+            ])
+            .height(2),
+        );
+    }
+    for g in &app.smb_groups {
+        rows.push(
+            Row::new(vec![
+                cell2(primary(field(g, "name")), secondary("group".into())),
+                cell1(Span::styled("group", theme::dim())),
+                cell1(Span::styled(
+                    any(g, &["members"]),
+                    Style::default().fg(theme::SUBTEXT),
+                )),
+            ])
+            .height(2),
+        );
+    }
+    let hint = match app.users_selection() {
+        UsersSelection::Account(_) => "n new · d delete · p password",
+        UsersSelection::SmbUser(_) => "n new · d delete · p password · g/G groups",
+        UsersSelection::Group(_) => "n new · d delete",
+    };
+    render_table(
+        f,
+        area,
+        &format!(
+            "users ({} accounts · {} smb · {} groups) — {hint}",
+            app.users.len(),
+            app.smb_users.len(),
+            app.smb_groups.len()
+        ),
+        &["name", "kind", "detail"],
+        &[
+            Constraint::Min(24),
+            Constraint::Length(10),
+            Constraint::Length(24),
+        ],
+        rows,
+        app.selected,
+        "no user data (admin required for accounts)",
+    );
+}
+
+// ── modals ──────────────────────────────────────────────────────
+
+fn render_form(f: &mut Frame, area: Rect, form: &Form) {
+    let height = (form.fields.len() as u16) + 6;
+    let [outer] = Layout::vertical([Constraint::Length(height)])
+        .flex(Flex::Center)
+        .areas(area);
+    let [card] = Layout::horizontal([Constraint::Length(58)])
+        .flex(Flex::Center)
+        .areas(outer);
+    f.render_widget(Clear, card);
+
+    let block = theme::panel(&form.title).border_style(Style::default().fg(theme::ACCENT));
+    let inner = block.inner(card);
+    f.render_widget(block, card);
+
+    let mut constraints = vec![Constraint::Length(1)]; // top spacer
+    constraints.extend(vec![Constraint::Length(1); form.fields.len()]);
+    constraints.push(Constraint::Length(1)); // spacer
+    constraints.push(Constraint::Length(1)); // hint
+    constraints.push(Constraint::Min(0)); // keys
+    let rows = Layout::vertical(constraints).split(inner);
+
+    for (i, fld) in form.fields.iter().enumerate() {
+        let focused = i == form.focus;
+        let marker = if focused { "▌ " } else { "  " };
+        let value_style = if focused {
+            Style::default()
+                .fg(theme::TEXT)
+                .add_modifier(Modifier::BOLD)
+        } else {
+            theme::subtle()
+        };
+        let cursor = if focused && fld.options.is_none() {
+            Span::styled("█", Style::default().fg(theme::ACCENT))
+        } else {
+            Span::raw("")
+        };
+        let mut line = Paragraph::new(Line::from(vec![
+            Span::styled(marker, Style::default().fg(theme::ACCENT)),
+            Span::styled(format!("{:<14}", fld.label), theme::label()),
+            Span::styled(fld.display(), value_style),
+            cursor,
+        ]));
+        if focused {
+            line = line.style(Style::default().bg(theme::SURFACE));
+        }
+        f.render_widget(line, rows[1 + i]);
+    }
+    f.render_widget(
+        Paragraph::new(Span::styled(form.hint.clone(), theme::dim())).alignment(Alignment::Center),
+        rows[form.fields.len() + 2],
+    );
+    f.render_widget(
+        Paragraph::new(Line::from(
+            [
+                theme::chip("↹", "field"),
+                theme::chip("◂▸", "choose"),
+                theme::chip("↵", "submit"),
+                theme::chip("esc", "cancel"),
+            ]
+            .concat(),
+        ))
+        .alignment(Alignment::Center),
+        rows[form.fields.len() + 3],
+    );
+}
+
+fn render_confirm(f: &mut Frame, area: Rect, confirm: &Confirm) {
+    let height = if confirm.type_to_confirm.is_some() {
+        9
+    } else {
+        7
+    };
+    let [outer] = Layout::vertical([Constraint::Length(height)])
+        .flex(Flex::Center)
+        .areas(area);
+    let [card] = Layout::horizontal([Constraint::Length(64)])
+        .flex(Flex::Center)
+        .areas(outer);
+    f.render_widget(Clear, card);
+
+    let block = theme::panel("confirm").border_style(Style::default().fg(theme::RED));
+    let inner = block.inner(card);
+    f.render_widget(block, card);
+
+    let rows = Layout::vertical([
+        Constraint::Length(1),
+        Constraint::Length(1),
+        Constraint::Length(1),
+        Constraint::Length(1),
+        Constraint::Min(0),
+    ])
+    .split(inner);
+
+    f.render_widget(
+        Paragraph::new(Span::styled(confirm.message.clone(), theme::text()))
+            .alignment(Alignment::Center),
+        rows[1],
+    );
+    if let Some(expected) = &confirm.type_to_confirm {
+        f.render_widget(
+            Paragraph::new(Line::from(vec![
+                Span::styled(format!("type '{expected}' to confirm: "), theme::dim()),
+                Span::styled(
+                    confirm.input.clone(),
+                    Style::default()
+                        .fg(theme::YELLOW)
+                        .add_modifier(Modifier::BOLD),
+                ),
+                Span::styled("█", Style::default().fg(theme::ACCENT)),
+            ]))
+            .alignment(Alignment::Center),
+            rows[2],
+        );
+        f.render_widget(
+            Paragraph::new(Line::from(
+                [theme::chip("↵", "confirm"), theme::chip("esc", "cancel")].concat(),
+            ))
+            .alignment(Alignment::Center),
+            rows[3],
+        );
+    } else {
+        f.render_widget(
+            Paragraph::new(Line::from(
+                [theme::chip("y/↵", "confirm"), theme::chip("esc", "cancel")].concat(),
+            ))
+            .alignment(Alignment::Center),
+            rows[3],
+        );
+    }
+}
+
 // ── shared table plumbing ───────────────────────────────────────
 
 #[allow(clippy::too_many_arguments)]
@@ -699,7 +963,7 @@ mod tests {
     #[test]
     fn renders_protocols_tab_with_data() {
         let mut app = App::for_test();
-        app.tab = 5;
+        app.tab = 6;
         app.protocols = vec![
             serde_json::json!({"name":"nfs","display_name":"NFS","enabled":true,"running":true}),
             serde_json::json!({"name":"smb","display_name":"SMB","enabled":false,"running":false}),
@@ -799,9 +1063,18 @@ mod tests {
             serde_json::json!({"name":"smb","display_name":"SMB","enabled":false,"running":false}),
             serde_json::json!({"name":"ssh","display_name":"SSH","enabled":true,"running":true}),
         ];
+        app.users = vec![
+            serde_json::json!({"username":"admin","role":"admin","must_change_password":false}),
+            serde_json::json!({"username":"kush","role":"operator","must_change_password":true}),
+        ];
+        app.smb_users = vec![serde_json::json!({"username":"media"})];
+        app.smb_groups = vec![serde_json::json!({"name":"family"})];
+        app.snapshots = vec![serde_json::json!({
+            "name":"data@daily","filesystem":"tank","subvolume":"data","backend":"btrfs"
+        })];
         app.selected = 1;
 
-        for tab in [0usize, 1, 5] {
+        for tab in [0usize, 1, 4, 6, 7] {
             app.tab = tab;
             let mut terminal = Terminal::new(TestBackend::new(110, 26)).unwrap();
             terminal.draw(|f| render_app(f, &app)).unwrap();
