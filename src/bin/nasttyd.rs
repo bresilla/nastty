@@ -47,11 +47,20 @@ async fn restore(state: Arc<AppState>) {
     if !remapped.is_empty() {
         info!("restored {} block subvolume device(s)", remapped.len());
     }
-    // Deliberately NOT calling protocols.restore(): upstream's appliance
-    // re-asserts every enabled protocol with `systemctl start` on boot,
-    // which triggers polkit auth prompts when running unprivileged.
-    // nastty only touches services on an explicit service.protocol.enable;
-    // start-at-boot belongs to systemd (`systemctl enable`).
+    // Protocol restore, but smarter than upstream's: upstream re-asserts
+    // every enabled protocol with `systemctl start` unconditionally, which
+    // triggers a polkit auth prompt per service when running unprivileged —
+    // even for services that are already up. Only touch protocols that are
+    // enabled but NOT running (the running check is read-only, no auth).
+    for p in state.protocols.list().await {
+        if p.enabled && !p.running {
+            info!("restoring protocol {} (enabled but not running)", p.name);
+            match state.protocols.enable(&p.name).await {
+                Ok(_) => info!("protocol {} restored", p.name),
+                Err(e) => warn!("protocol {} restore failed: {e}", p.name),
+            }
+        }
+    }
     if let Err(e) = state.smb.ensure_config_scaffolding().await {
         warn!("smb config scaffolding failed (samba not set up?): {e}");
     }

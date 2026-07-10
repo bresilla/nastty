@@ -56,10 +56,11 @@ First run creates user `admin` / password `admin` with a forced password
 change: every RPC except `auth.change_password` / `auth.me` / `auth.logout`
 returns "Password change required" until you change it.
 
-Unlike the upstream appliance, `nasttyd` never touches system services at
-startup — no `systemctl start` storm (and no polkit prompts when running
-unprivileged). Services are only started/stopped when you explicitly toggle
-a protocol; use `systemctl enable <svc>` if you want one to start at boot.
+Protocol restore at startup is smarter than the upstream appliance's: it
+only starts services for protocols that are enabled but **not already
+running** (the check is read-only). Services that are already up are left
+alone, so an unprivileged `make serve` doesn't trigger a polkit prompt per
+service the way a blind `systemctl start` storm would.
 
 ## Talk to it
 
