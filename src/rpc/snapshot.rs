@@ -13,6 +13,41 @@ pub(super) async fn try_route(
     state: &AppState,
     session: &Session,
 ) -> Option<Response> {
+    // btrfs pre-route for filesystem-addressed snapshot ops.
+    if let Some(fs_name) = str_param(req, "filesystem")
+        && state.btrfs.manages(fs_name).await
+    {
+        if session.filesystem.as_deref().is_some_and(|p| p != fs_name) {
+            return Some(err(req, "access denied"));
+        }
+        let fs_name = fs_name.to_string();
+        return Some(match req.method.as_str() {
+            "snapshot.list" => match state.btrfs.snapshot_list(&fs_name).await {
+                Ok(v) => ok(req, v),
+                Err(e) => err(req, e),
+            },
+            "snapshot.create" => match (require_str(req, "subvolume"), require_str(req, "name")) {
+                (Ok(subvol), Ok(label)) => {
+                    match state.btrfs.snapshot_create(&fs_name, subvol, label).await {
+                        Ok(v) => ok(req, v),
+                        Err(e) => err(req, e),
+                    }
+                }
+                (Err(r), _) | (_, Err(r)) => r,
+            },
+            "snapshot.delete" => match require_str(req, "name") {
+                Ok(name) => match state.btrfs.snapshot_delete(&fs_name, name).await {
+                    Ok(()) => ok(req, "ok"),
+                    Err(e) => err(req, e),
+                },
+                Err(r) => r,
+            },
+            _ => err(
+                req,
+                format!("{} is not supported on btrfs filesystems", req.method),
+            ),
+        });
+    }
     Some(match req.method.as_str() {
         "snapshot.list" => match require_str(req, "filesystem") {
             Ok(fs_name) => {

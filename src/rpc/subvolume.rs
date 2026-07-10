@@ -12,6 +12,39 @@ pub(super) async fn try_route(
     state: &AppState,
     session: &Session,
 ) -> Option<Response> {
+    // btrfs pre-route for filesystem-addressed subvolume ops.
+    if let Some(fs_name) = str_param(req, "filesystem")
+        && state.btrfs.manages(fs_name).await
+    {
+        if session.filesystem.as_deref().is_some_and(|p| p != fs_name) {
+            return Some(err(req, "access denied"));
+        }
+        let fs_name = fs_name.to_string();
+        return Some(match req.method.as_str() {
+            "subvolume.list" => match state.btrfs.subvolume_list(&fs_name).await {
+                Ok(v) => ok(req, v),
+                Err(e) => err(req, e),
+            },
+            "subvolume.create" => match require_str(req, "name") {
+                Ok(name) => match state.btrfs.subvolume_create(&fs_name, name).await {
+                    Ok(v) => ok(req, v),
+                    Err(e) => err(req, e),
+                },
+                Err(r) => r,
+            },
+            "subvolume.delete" => match require_str(req, "name") {
+                Ok(name) => match state.btrfs.subvolume_delete(&fs_name, name).await {
+                    Ok(()) => ok(req, "ok"),
+                    Err(e) => err(req, e),
+                },
+                Err(r) => r,
+            },
+            _ => err(
+                req,
+                format!("{} is not supported on btrfs filesystems", req.method),
+            ),
+        });
+    }
     Some(match req.method.as_str() {
         "subvolume.list_all" => {
             let fs_filter = session.filesystem.as_deref();

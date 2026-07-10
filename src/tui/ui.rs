@@ -289,11 +289,10 @@ fn render_devices(f: &mut Frame, area: Rect, app: &App) {
 }
 
 fn render_filesystems(f: &mut Frame, area: Rect, app: &App) {
-    // The empty state tells the truth: without bcachefs on the host there
-    // is nothing to create filesystems WITH.
+    // The empty state tells the truth about what this host can create.
     let empty_text = match &app.system_info {
         Some(info) if !bcachefs_available(info) => {
-            "bcachefs not available on this host — install bcachefs-tools and the kernel module (see README)"
+            "no filesystems — create one with fs.create (btrfs works on this host; bcachefs needs tools + kernel module)"
         }
         _ => "no filesystems — create one with fs.create",
     };
@@ -302,11 +301,18 @@ fn render_filesystems(f: &mut Frame, area: Rect, app: &App) {
         .iter()
         .map(|fs| {
             let mounted = fs.get("mounted").and_then(|v| v.as_bool()).unwrap_or(false);
+            let backend = field(fs, "backend");
+            let backend_color = match backend.as_str() {
+                "btrfs" => theme::GREEN,
+                "bcachefs" => theme::MAUVE,
+                _ => theme::MUTED,
+            };
             Row::new(vec![
                 cell2(
                     primary(field(fs, "name")),
                     secondary(field(fs, "mount_point")),
                 ),
+                cell1(Span::styled(backend, Style::default().fg(backend_color))),
                 cell1(theme::badge(mounted, "mounted", "unmounted")),
                 cell1(Span::styled(field(fs, "state"), theme::subtle())),
             ])
@@ -317,11 +323,12 @@ fn render_filesystems(f: &mut Frame, area: Rect, app: &App) {
         f,
         area,
         &format!("filesystems ({})", app.filesystems.len()),
-        &["filesystem", "status", "state"],
+        &["filesystem", "backend", "status", "state"],
         &[
-            Constraint::Min(30),
+            Constraint::Min(28),
+            Constraint::Length(10),
             Constraint::Length(14),
-            Constraint::Length(14),
+            Constraint::Length(12),
         ],
         rows,
         app.selected,
