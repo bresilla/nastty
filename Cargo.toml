@@ -2,7 +2,7 @@
 name = "nastty"
 version = "0.1.0"
 edition = "2024"
-description = "nastty"
+description = "Thin local NAS API server built on the upstream nasty crates"
 license = "MIT"
 readme = "README.md"
 publish = false
@@ -10,7 +10,26 @@ publish = false
 [lib]
 path = "src/lib.rs"
 
+[[bin]]
+name = "nasttyd"
+path = "src/bin/nasttyd.rs"
+
 [dependencies]
+nasty-common = { git = "https://github.com/nasty-project/nasty", rev = "4ad3fa304b57b8ce82774a36693aa87769d1478b" }
+nasty-storage = { git = "https://github.com/nasty-project/nasty", rev = "4ad3fa304b57b8ce82774a36693aa87769d1478b" }
+nasty-sharing = { git = "https://github.com/nasty-project/nasty", rev = "4ad3fa304b57b8ce82774a36693aa87769d1478b" }
+nasty-snapshot = { git = "https://github.com/nasty-project/nasty", rev = "4ad3fa304b57b8ce82774a36693aa87769d1478b" }
+nasty-system = { git = "https://github.com/nasty-project/nasty", rev = "4ad3fa304b57b8ce82774a36693aa87769d1478b" }
+
+tokio = { version = "1", features = ["full"] }
+axum = { version = "0.8", features = ["ws"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+argon2 = "0.5"
+rand = "0.10"
+futures-util = "0.3"
+uuid = { version = "1", features = ["v4"] }
 
 [dev-dependencies]
-
