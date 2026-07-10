@@ -333,9 +333,13 @@ async fn btrfs_route(req: &Request, state: &AppState, session: &Session) -> Opti
                 Err(e) => Some(invalid(req, e)),
             }
         }
-        // Name-addressed ops: route to btrfs when it manages that name.
-        "fs.get" | "fs.mount" | "fs.unmount" | "fs.destroy" => {
-            let name = str_param(req, "name")?;
+        // Every other fs.* method addresses a filesystem by `name` (fs.*)
+        // or `filesystem` (fs.device.*). When that name is btrfs-managed,
+        // handle it here — with an explicit "not supported" for the
+        // bcachefs-only concepts, so callers never see a lying
+        // "filesystem not found" from the bcachefs service.
+        m if m.starts_with("fs.") => {
+            let name = str_param(req, "name").or_else(|| str_param(req, "filesystem"))?;
             if session.filesystem.as_deref().is_some_and(|p| p != name) {
                 return None; // let the bcachefs arm produce the denial
             }
@@ -343,6 +347,8 @@ async fn btrfs_route(req: &Request, state: &AppState, session: &Session) -> Opti
                 return None;
             }
             Some(match req.method.as_str() {
+                // A bcachefs create colliding with an existing btrfs name.
+                "fs.create" => err(req, format!("filesystem '{name}' already exists (btrfs)")),
                 "fs.get" => match state.btrfs.get(name).await {
                     Ok(v) => ok(req, v),
                     Err(e) => err(req, e),
@@ -365,7 +371,49 @@ async fn btrfs_route(req: &Request, state: &AppState, session: &Session) -> Opti
                         }
                     }
                 }
-                _ => unreachable!(),
+                "fs.usage" => match state.btrfs.usage(name).await {
+                    Ok(v) => ok(req, v),
+                    Err(e) => err(req, e),
+                },
+                "fs.scrub.start" => match state.btrfs.scrub_start(name).await {
+                    Ok(()) => ok(req, "ok"),
+                    Err(e) => err(req, e),
+                },
+                "fs.scrub.status" => match state.btrfs.scrub_status(name).await {
+                    Ok(v) => ok(req, v),
+                    Err(e) => err(req, e),
+                },
+                "fs.scrub.cancel" => match state.btrfs.scrub_cancel(name).await {
+                    Ok(()) => ok(req, "ok"),
+                    Err(e) => err(req, e),
+                },
+                "fs.options.update" => match str_param(req, "compression") {
+                    Some(c) => match state.btrfs.update_compression(name, c).await {
+                        Ok(v) => ok(req, v),
+                        Err(e) => err(req, e),
+                    },
+                    None => invalid(req, "btrfs supports updating: compression"),
+                },
+                "fs.device.add" => match require_str(req, "device") {
+                    Ok(device) => match state.btrfs.device_add(name, device).await {
+                        Ok(v) => ok(req, v),
+                        Err(e) => err(req, e),
+                    },
+                    Err(r) => r,
+                },
+                "fs.device.remove" => match require_str(req, "device") {
+                    Ok(device) => match state.btrfs.device_remove(name, device).await {
+                        Ok(v) => ok(req, v),
+                        Err(e) => err(req, e),
+                    },
+                    Err(r) => r,
+                },
+                // bcachefs-only concepts: encryption/keys, member states,
+                // online fsck, per-device labels.
+                other => err(
+                    req,
+                    format!("{other} is not supported on btrfs filesystems"),
+                ),
             })
         }
         _ => None,

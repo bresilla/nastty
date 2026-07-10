@@ -42,6 +42,27 @@ pub(super) async fn try_route(
                 },
                 Err(r) => r,
             },
+            "snapshot.clone" => {
+                // Mirror the bcachefs param shape {subvolume, snapshot,
+                // new_name}; btrfs stores snapshots as `<subvol>@<label>`.
+                match (require_str(req, "snapshot"), require_str(req, "new_name")) {
+                    (Ok(snapshot), Ok(new_name)) => {
+                        let full = if snapshot.contains('@') {
+                            snapshot.to_string()
+                        } else {
+                            match require_str(req, "subvolume") {
+                                Ok(sub) => format!("{}@{snapshot}", sub.replace('/', "_")),
+                                Err(r) => return Some(r),
+                            }
+                        };
+                        match state.btrfs.snapshot_clone(&fs_name, &full, new_name).await {
+                            Ok(v) => ok(req, v),
+                            Err(e) => err(req, e),
+                        }
+                    }
+                    (Err(r), _) | (_, Err(r)) => r,
+                }
+            }
             _ => err(
                 req,
                 format!("{} is not supported on btrfs filesystems", req.method),

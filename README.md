@@ -41,7 +41,9 @@ Storage backends — at least one is required:
 
 - **btrfs** (the easy path): `sudo apt install btrfs-progs` — the driver is
   already in the Ubuntu kernel. `fs.create` with `"backend": "btrfs"` gives
-  you filesystems, subvolumes, and snapshots today.
+  you filesystems, subvolumes, snapshots + clones, scrub, device add/remove,
+  and compression tuning today. bcachefs-only concepts (encryption/keys,
+  member states, online fsck) return an explicit "not supported on btrfs".
 - **bcachefs**: Ubuntu ships no package; build
   [bcachefs-tools](https://github.com/koverstreet/bcachefs-tools) from source
   plus its out-of-tree kernel module.
