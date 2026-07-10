@@ -98,7 +98,7 @@ fn render_system_card(f: &mut Frame, area: Rect, app: &App) {
     } else {
         Span::styled("● disconnected", Style::default().fg(theme::RED))
     };
-    let lines = vec![
+    let mut lines = vec![
         Line::from(""),
         Line::from(vec![kv_key("server"), conn]),
         kv("account", &format!("{} ({})", app.username, app.role)),
@@ -112,30 +112,51 @@ fn render_system_card(f: &mut Frame, area: Rect, app: &App) {
         kv("timezone", &field(&info, "timezone")),
         Line::from(""),
         kv("engine", &field(&info, "version")),
-        Line::from(vec![kv_key("bcachefs"), bcachefs_span(&info)]),
+        Line::from(vec![kv_key("btrfs"), backend_span(btrfs_version(&info))]),
+        Line::from(vec![
+            kv_key("bcachefs"),
+            backend_span(bcachefs_version(&info)),
+        ]),
         kv("kvm", &field(&info, "kvm_available")),
     ];
+    // Only alarm when there is NO usable storage backend at all.
+    if btrfs_version(&info).is_none() && bcachefs_version(&info).is_none() {
+        lines.push(Line::from(""));
+        lines.push(Line::from(Span::styled(
+            "  ✗ no storage backend — install btrfs-progs or bcachefs-tools",
+            Style::default().fg(theme::RED),
+        )));
+    }
 
     f.render_widget(Paragraph::new(lines).block(theme::panel("system")), area);
 }
 
-/// True when the server reports a usable bcachefs (kernel module probed).
-fn bcachefs_available(info: &Value) -> bool {
-    matches!(
-        info.get("bcachefs_version").and_then(|v| v.as_str()),
-        Some(v) if v != "unknown" && !v.is_empty()
-    )
+/// bcachefs version when the server reports a usable one.
+fn bcachefs_version(info: &Value) -> Option<String> {
+    match info.get("bcachefs_version").and_then(|v| v.as_str()) {
+        Some(v) if v != "unknown" && !v.is_empty() => Some(v.to_string()),
+        _ => None,
+    }
 }
 
-fn bcachefs_span(info: &Value) -> Span<'static> {
-    if bcachefs_available(info) {
-        Span::styled(field(info, "bcachefs_version"), theme::text())
-    } else {
-        Span::styled(
-            "✗ not available — install bcachefs-tools + kernel module",
-            Style::default().fg(theme::RED),
-        )
+/// btrfs-progs version injected by nasttyd into system.info.
+fn btrfs_version(info: &Value) -> Option<String> {
+    info.get("btrfs_version")
+        .and_then(|v| v.as_str())
+        .map(|v| v.to_string())
+}
+
+/// A backend line: its version, or a calm dim "not installed".
+fn backend_span(version: Option<String>) -> Span<'static> {
+    match version {
+        Some(v) => Span::styled(format!("● {v}"), Style::default().fg(theme::GREEN)),
+        None => Span::styled("○ not installed", theme::dim()),
     }
+}
+
+/// True when the server reports a usable bcachefs.
+fn bcachefs_available(info: &Value) -> bool {
+    bcachefs_version(info).is_some()
 }
 
 fn render_stat_tiles(f: &mut Frame, area: Rect, app: &App) {
@@ -291,8 +312,11 @@ fn render_devices(f: &mut Frame, area: Rect, app: &App) {
 fn render_filesystems(f: &mut Frame, area: Rect, app: &App) {
     // The empty state tells the truth about what this host can create.
     let empty_text = match &app.system_info {
+        Some(info) if btrfs_version(info).is_none() && !bcachefs_available(info) => {
+            "no storage backend — install btrfs-progs (or bcachefs-tools) first"
+        }
         Some(info) if !bcachefs_available(info) => {
-            "no filesystems — create one with fs.create (btrfs works on this host; bcachefs needs tools + kernel module)"
+            "no filesystems — create one with fs.create (backend: btrfs)"
         }
         _ => "no filesystems — create one with fs.create",
     };
@@ -759,7 +783,8 @@ mod tests {
         app.system_info = Some(serde_json::json!({
             "hostname": "tron", "kernel": "7.0.0-27-generic",
             "uptime_seconds": 11520, "timezone": "UTC",
-            "version": "0.0.13", "bcachefs_version": "1.38.8", "kvm_available": true,
+            "version": "0.0.13", "bcachefs_version": "unknown",
+            "btrfs_version": "6.17.1", "kvm_available": true,
         }));
         app.devices = vec![
             serde_json::json!({"path":"/dev/sda","device_class":"ssd","dev_type":"disk",
@@ -776,7 +801,7 @@ mod tests {
         ];
         app.selected = 1;
 
-        for tab in [1usize, 5] {
+        for tab in [0usize, 1, 5] {
             app.tab = tab;
             let mut terminal = Terminal::new(TestBackend::new(110, 26)).unwrap();
             terminal.draw(|f| render_app(f, &app)).unwrap();

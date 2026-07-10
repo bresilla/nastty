@@ -13,6 +13,8 @@ pub struct AppState {
     /// Whether bcachefs-tools is on PATH. When it isn't, `fs.create`
     /// defaults to the btrfs backend instead.
     pub bcachefs_available: bool,
+    /// btrfs-progs version when installed (`btrfs --version`).
+    pub btrfs_version: Option<String>,
     pub system: nasty_system::SystemService,
     pub protocols: nasty_system::protocol::ProtocolService,
     pub filesystems: nasty_storage::FilesystemService,
@@ -34,10 +36,20 @@ impl AppState {
         let bcachefs_available = std::env::var_os("PATH")
             .map(|paths| std::env::split_paths(&paths).any(|p| p.join("bcachefs").is_file()))
             .unwrap_or(false);
+        // btrfs-progs version, e.g. "6.18" — None when not installed.
+        let btrfs_version = nasty_common::cmd::run_ok("btrfs", &["--version"])
+            .await
+            .ok()
+            .and_then(|out| {
+                out.split_whitespace()
+                    .find(|w| w.starts_with('v'))
+                    .map(|v| v.trim_start_matches('v').to_string())
+            });
         Self {
             auth: crate::auth::AuthService::new().await,
             events: event_tx,
             bcachefs_available,
+            btrfs_version,
             system: nasty_system::SystemService::new(None, None),
             protocols: nasty_system::protocol::ProtocolService::new(),
             filesystems: nasty_storage::FilesystemService::new(),
