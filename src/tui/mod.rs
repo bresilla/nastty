@@ -3,6 +3,7 @@
 
 mod app;
 mod login;
+mod theme;
 mod ui;
 
 use std::io::{Stdout, stdout};

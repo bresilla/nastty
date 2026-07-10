@@ -3,15 +3,16 @@
 use futures_util::SinkExt;
 use ratatui::Frame;
 use ratatui::crossterm::event::{Event, KeyCode, KeyEventKind};
-use ratatui::layout::{Alignment, Constraint, Layout};
-use ratatui::style::{Color, Modifier, Style};
+use ratatui::layout::{Alignment, Constraint, Flex, Layout, Rect};
+use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Borders, Clear, Paragraph};
+use ratatui::widgets::{Block, BorderType, Borders, Clear, Padding, Paragraph};
 use tokio::sync::mpsc;
+use tui_big_text::{BigText, PixelSize};
 
 use crate::client::{self, WsAck, WsStream};
 
-use super::Term;
+use super::{Term, theme};
 
 /// Which field the login form has focused.
 #[derive(Clone, Copy, PartialEq)]
@@ -25,6 +26,7 @@ struct LoginForm {
     pass: String,
     focus: Field,
     status: String,
+    error: bool,
     busy: bool,
 }
 
@@ -40,6 +42,7 @@ impl LoginForm {
             user,
             pass: String::new(),
             status: String::new(),
+            error: false,
             busy: false,
         }
     }
@@ -56,7 +59,7 @@ pub async fn login_flow(
     let mut form = LoginForm::new(user);
 
     loop {
-        terminal.draw(|f| render_login(f, &form))?;
+        terminal.draw(|f| render_login(f, &form, base))?;
 
         let Some(ev) = input_rx.recv().await else {
             return Ok(None); // input thread gone
@@ -86,12 +89,14 @@ pub async fn login_flow(
             },
             KeyCode::Enter => {
                 form.busy = true;
+                form.error = false;
                 form.status = "connecting…".to_string();
-                terminal.draw(|f| render_login(f, &form))?;
+                terminal.draw(|f| render_login(f, &form, base))?;
 
                 match try_connect(base, &form.user, &form.pass).await {
                     Err(e) => {
                         form.status = e;
+                        form.error = true;
                         form.busy = false;
                     }
                     Ok((ws, ack)) if ack.must_change_password => {
@@ -100,6 +105,7 @@ pub async fn login_flow(
                             None => {
                                 // user cancelled the change; back to login
                                 form.status = "password change cancelled".to_string();
+                                form.error = true;
                                 form.busy = false;
                             }
                         }
@@ -130,9 +136,10 @@ async fn change_password_flow(
     let mut confirm = String::new();
     let mut focus_new = true;
     let mut status = "set a new password (min 8 characters)".to_string();
+    let mut error = false;
 
     loop {
-        terminal.draw(|f| render_change(f, &new, &confirm, focus_new, &status))?;
+        terminal.draw(|f| render_change(f, &new, &confirm, focus_new, &status, error))?;
 
         let Some(ev) = input_rx.recv().await else {
             return Ok(None);
@@ -162,14 +169,17 @@ async fn change_password_flow(
             KeyCode::Enter => {
                 if new != confirm {
                     status = "passwords do not match".to_string();
+                    error = true;
                     continue;
                 }
                 if new.len() < 8 {
                     status = "password must be at least 8 characters".to_string();
+                    error = true;
                     continue;
                 }
                 status = "changing…".to_string();
-                terminal.draw(|f| render_change(f, &new, &confirm, focus_new, &status))?;
+                error = false;
+                terminal.draw(|f| render_change(f, &new, &confirm, focus_new, &status, error))?;
 
                 let req = client::request(
                     0,
@@ -178,6 +188,7 @@ async fn change_password_flow(
                 );
                 if let Err(e) = ws.send(req).await {
                     status = format!("send failed: {e}");
+                    error = true;
                     continue;
                 }
                 match client::next_text(&mut ws).await {
@@ -196,8 +207,12 @@ async fn change_password_flow(
                         }
                         client::Incoming::Response { result: Err(e), .. } => {
                             status = e;
+                            error = true;
                         }
-                        _ => status = "unexpected server reply".to_string(),
+                        _ => {
+                            status = "unexpected server reply".to_string();
+                            error = true;
+                        }
                     },
                 }
             }
@@ -206,19 +221,37 @@ async fn change_password_flow(
     }
 }
 
-fn render_login(f: &mut Frame, form: &LoginForm) {
-    let area = centered(f.area(), 52, 11);
-    f.render_widget(Clear, area);
+// ── rendering ───────────────────────────────────────────────────
+
+fn render_login(f: &mut Frame, form: &LoginForm, base: &str) {
+    // Vertical stack, centered: logo, card, server line.
+    let [logo_area, card_area, server_area] = Layout::vertical([
+        Constraint::Length(9),
+        Constraint::Length(9),
+        Constraint::Length(1),
+    ])
+    .flex(Flex::Center)
+    .areas(f.area());
+
+    render_logo(f, logo_area);
+
+    // The card itself, centered horizontally.
+    let [card] = Layout::horizontal([Constraint::Length(56)])
+        .flex(Flex::Center)
+        .areas(card_area);
+    f.render_widget(Clear, card);
 
     let block = Block::default()
         .borders(Borders::ALL)
-        .title(" nastty — sign in ")
-        .title_alignment(Alignment::Center);
-    let inner = block.inner(area);
-    f.render_widget(block, area);
+        .border_type(BorderType::Rounded)
+        .border_style(Style::default().fg(theme::ACCENT))
+        .title(Span::styled(" sign in ", theme::title()))
+        .title_alignment(Alignment::Center)
+        .padding(Padding::new(2, 2, 1, 0));
+    let inner = block.inner(card);
+    f.render_widget(block, card);
 
     let rows = Layout::vertical([
-        Constraint::Length(1), // spacer
         Constraint::Length(1), // user
         Constraint::Length(1), // pass
         Constraint::Length(1), // spacer
@@ -228,37 +261,63 @@ fn render_login(f: &mut Frame, form: &LoginForm) {
     .split(inner);
 
     f.render_widget(
-        field_line("User", &form.user, false, form.focus == Field::User),
+        field_line("user", &form.user, false, form.focus == Field::User),
+        rows[0],
+    );
+    f.render_widget(
+        field_line("pass", &form.pass, true, form.focus == Field::Pass),
         rows[1],
     );
+    f.render_widget(status_line(&form.status, form.error, form.busy), rows[3]);
     f.render_widget(
-        field_line("Pass", &form.pass, true, form.focus == Field::Pass),
-        rows[2],
-    );
-    f.render_widget(
-        Paragraph::new(form.status.clone()).style(Style::default().fg(Color::Yellow)),
+        Paragraph::new(Line::from(
+            [
+                theme::chip("tab", "switch"),
+                theme::chip("enter", "sign in"),
+                theme::chip("esc", "quit"),
+            ]
+            .concat(),
+        ))
+        .alignment(Alignment::Center),
         rows[4],
     );
+
     f.render_widget(
-        Paragraph::new("Tab switch · Enter submit · Esc quit")
-            .style(Style::default().fg(Color::DarkGray)),
-        rows[5],
+        Paragraph::new(Span::styled(base.to_string(), theme::dim())).alignment(Alignment::Center),
+        server_area,
     );
 }
 
-fn render_change(f: &mut Frame, new: &str, confirm: &str, focus_new: bool, status: &str) {
-    let area = centered(f.area(), 56, 11);
-    f.render_widget(Clear, area);
+fn render_change(
+    f: &mut Frame,
+    new: &str,
+    confirm: &str,
+    focus_new: bool,
+    status: &str,
+    error: bool,
+) {
+    let [logo_area, card_area] = Layout::vertical([Constraint::Length(9), Constraint::Length(10)])
+        .flex(Flex::Center)
+        .areas(f.area());
+
+    render_logo(f, logo_area);
+
+    let [card] = Layout::horizontal([Constraint::Length(60)])
+        .flex(Flex::Center)
+        .areas(card_area);
+    f.render_widget(Clear, card);
 
     let block = Block::default()
         .borders(Borders::ALL)
-        .title(" change password (required) ")
-        .title_alignment(Alignment::Center);
-    let inner = block.inner(area);
-    f.render_widget(block, area);
+        .border_type(BorderType::Rounded)
+        .border_style(Style::default().fg(theme::YELLOW))
+        .title(Span::styled(" change password — required ", theme::title()))
+        .title_alignment(Alignment::Center)
+        .padding(Padding::new(2, 2, 1, 0));
+    let inner = block.inner(card);
+    f.render_widget(block, card);
 
     let rows = Layout::vertical([
-        Constraint::Length(1),
         Constraint::Length(1),
         Constraint::Length(1),
         Constraint::Length(1),
@@ -267,17 +326,48 @@ fn render_change(f: &mut Frame, new: &str, confirm: &str, focus_new: bool, statu
     ])
     .split(inner);
 
-    f.render_widget(field_line("New    ", new, true, focus_new), rows[1]);
-    f.render_widget(field_line("Confirm", confirm, true, !focus_new), rows[2]);
+    f.render_widget(field_line("new    ", new, true, focus_new), rows[0]);
+    f.render_widget(field_line("confirm", confirm, true, !focus_new), rows[1]);
+    f.render_widget(status_line(status, error, false), rows[3]);
     f.render_widget(
-        Paragraph::new(status.to_string()).style(Style::default().fg(Color::Yellow)),
+        Paragraph::new(Line::from(
+            [
+                theme::chip("tab", "switch"),
+                theme::chip("enter", "submit"),
+                theme::chip("esc", "cancel"),
+            ]
+            .concat(),
+        ))
+        .alignment(Alignment::Center),
         rows[4],
     );
-    f.render_widget(
-        Paragraph::new("Tab switch · Enter submit · Esc cancel")
-            .style(Style::default().fg(Color::DarkGray)),
-        rows[5],
-    );
+}
+
+/// Big two-tone "NASTTY" logo.
+fn render_logo(f: &mut Frame, area: Rect) {
+    let line = Line::from(vec![
+        Span::styled("NAS", Style::default().fg(theme::MAUVE)),
+        Span::styled("TTY", Style::default().fg(theme::ACCENT)),
+    ]);
+    let big = BigText::builder()
+        .pixel_size(PixelSize::Full)
+        .lines(vec![line])
+        .alignment(Alignment::Center)
+        .build();
+    f.render_widget(big, area);
+    // Tagline under the logo, in the last row of the logo area.
+    if area.height >= 9 {
+        let tag = Rect {
+            y: area.y + 8,
+            height: 1,
+            ..area
+        };
+        f.render_widget(
+            Paragraph::new(Span::styled("· your disks, your rules ·", theme::dim()))
+                .alignment(Alignment::Center),
+            tag,
+        );
+    }
 }
 
 fn field_line<'a>(label: &'a str, value: &str, secret: bool, focused: bool) -> Paragraph<'a> {
@@ -286,33 +376,67 @@ fn field_line<'a>(label: &'a str, value: &str, secret: bool, focused: bool) -> P
     } else {
         value.to_string()
     };
-    let marker = if focused { "▶ " } else { "  " };
+    let marker = if focused { "▌ " } else { "  " };
     let value_style = if focused {
         Style::default()
-            .fg(Color::White)
+            .fg(theme::TEXT)
             .add_modifier(Modifier::BOLD)
     } else {
-        Style::default().fg(Color::Gray)
+        theme::subtle()
+    };
+    let cursor = if focused {
+        Span::styled("█", Style::default().fg(theme::ACCENT))
+    } else {
+        Span::raw("")
     };
     Paragraph::new(Line::from(vec![
-        Span::styled(
-            format!("{marker}{label}: "),
-            Style::default().fg(Color::Cyan),
-        ),
+        Span::styled(marker, Style::default().fg(theme::ACCENT)),
+        Span::styled(format!("{label}  "), theme::label()),
         Span::styled(shown, value_style),
+        cursor,
     ]))
 }
 
-/// Center a `w`×`h` rectangle inside `area`.
-fn centered(area: ratatui::layout::Rect, w: u16, h: u16) -> ratatui::layout::Rect {
-    let w = w.min(area.width);
-    let h = h.min(area.height);
-    let x = area.x + (area.width.saturating_sub(w)) / 2;
-    let y = area.y + (area.height.saturating_sub(h)) / 2;
-    ratatui::layout::Rect {
-        x,
-        y,
-        width: w,
-        height: h,
+fn status_line<'a>(status: &str, error: bool, busy: bool) -> Paragraph<'a> {
+    let style = if error {
+        Style::default().fg(theme::RED)
+    } else if busy {
+        Style::default().fg(theme::YELLOW)
+    } else {
+        theme::dim()
+    };
+    let prefix = if error {
+        "✗ "
+    } else if busy {
+        "◌ "
+    } else {
+        ""
+    };
+    Paragraph::new(Span::styled(format!("{prefix}{status}"), style)).alignment(Alignment::Center)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Visual preview of the login screen. Run with:
+    /// `cargo test --lib -- --ignored login_preview --nocapture`
+    #[test]
+    #[ignore]
+    fn login_preview() {
+        use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
+
+        let mut form = LoginForm::new(Some("admin".to_string()));
+        form.pass = "secret".to_string();
+        let mut terminal = Terminal::new(TestBackend::new(110, 30)).unwrap();
+        terminal
+            .draw(|f| render_login(f, &form, "http://127.0.0.1:2137"))
+            .unwrap();
+        let buf = terminal.backend().buffer().clone();
+        for y in 0..buf.area.height {
+            let line: String = (0..buf.area.width).map(|x| buf[(x, y)].symbol()).collect();
+            println!("{line}");
+        }
     }
 }
