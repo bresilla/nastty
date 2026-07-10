@@ -1,6 +1,7 @@
 //! JSON-RPC dispatcher. Ported from the upstream engine's `router/mod.rs`,
 //! trimmed to the filesystem / sharing / disk domains this server exposes.
 
+mod alerts;
 mod auth;
 mod fs;
 mod service;
@@ -79,6 +80,24 @@ pub(crate) async fn require_protocol(
     } else {
         None
     }
+}
+
+/// Fetch JSON from the (optional) nasty-metrics service.
+pub(crate) async fn fetch_metrics_json<T: serde::de::DeserializeOwned>(
+    client: &reqwest::Client,
+    path: &str,
+) -> Result<T, String> {
+    let url = format!("{}{path}", crate::state::METRICS_BASE);
+    let resp = client
+        .get(&url)
+        .send()
+        .await
+        .map_err(|e| format!("metrics service unavailable: {e}"))?
+        .error_for_status()
+        .map_err(|e| format!("metrics service error: {e}"))?;
+    resp.json::<T>()
+        .await
+        .map_err(|e| format!("metrics parse error: {e}"))
 }
 
 /// Gate an RDMA-transport request (iSER portal, NVMe-oF rdma port) on
@@ -301,13 +320,21 @@ async fn route(req: &Request, state: &AppState, session: &Session) -> Response {
         .unwrap_or(req.method.as_str());
     let resp = match prefix {
         "auth" => auth::try_route(req, state, session).await,
+        "alert" => alerts::try_route(req, state, session).await,
         "fs" | "device" => fs::try_route(req, state, session).await,
         "subvolume" => subvolume::try_route(req, state, session).await,
         "snapshot" => snapshot::try_route(req, state, session).await,
         "share" => share::try_route(req, state, session).await,
         "smb" => smb::try_route(req, state, session).await,
         "service" => service::try_route(req, state, session).await,
-        "system" => system::try_route(req, state, session).await,
+        "system" => {
+            // `system.alerts` lives with the alert rules; the rest is system.
+            if req.method == "system.alerts" {
+                alerts::try_route(req, state, session).await
+            } else {
+                system::try_route(req, state, session).await
+            }
+        }
         _ => None,
     };
     resp.unwrap_or_else(|| {

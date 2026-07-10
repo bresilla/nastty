@@ -7,6 +7,9 @@ use std::sync::Arc;
 /// The payload is the collection name (e.g. "filesystem", "subvolume", "share.nfs").
 pub type EventBus = tokio::sync::broadcast::Sender<String>;
 
+/// Base URL of the (optional) nasty-metrics daemon.
+pub const METRICS_BASE: &str = "http://127.0.0.1:2138";
+
 pub struct AppState {
     pub auth: crate::auth::AuthService,
     pub events: EventBus,
@@ -16,6 +19,12 @@ pub struct AppState {
     /// btrfs-progs version when installed (`btrfs --version`).
     pub btrfs_version: Option<String>,
     pub system: nasty_system::SystemService,
+    pub settings: nasty_system::settings::SettingsService,
+    pub tuning: nasty_system::tuning::TuningService,
+    pub alerts: nasty_system::alerts::AlertService,
+    pub network: nasty_system::network::NetworkService,
+    pub nut: nasty_system::nut::NutService,
+    pub metrics_client: reqwest::Client,
     pub protocols: nasty_system::protocol::ProtocolService,
     pub filesystems: nasty_storage::FilesystemService,
     pub btrfs: nasty_storage::BtrfsService,
@@ -51,6 +60,12 @@ impl AppState {
             bcachefs_available,
             btrfs_version,
             system: nasty_system::SystemService::new(None, None),
+            settings: nasty_system::settings::SettingsService::new().await,
+            tuning: nasty_system::tuning::TuningService::new().await,
+            alerts: nasty_system::alerts::AlertService::new().await,
+            network: nasty_system::network::NetworkService::new(),
+            nut: nasty_system::nut::NutService::new().await,
+            metrics_client: reqwest::Client::new(),
             protocols: nasty_system::protocol::ProtocolService::new(),
             filesystems: nasty_storage::FilesystemService::new(),
             btrfs: nasty_storage::BtrfsService::new(),
