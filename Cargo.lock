@@ -1610,7 +1610,7 @@ dependencies = [
 [[package]]
 name = "nasty-apps"
 version = "0.0.13"
-source = "git+https://github.com/bresilla/nasty?branch=nastty#3a0d77315a6996a0e2d02c46d3da3ea4f4030189"
+source = "git+https://github.com/bresilla/nasty?branch=nastty#bf4ea74ad431ba15f8e6cbaa1e3305e615f44d54"
 dependencies = [
  "bollard",
  "futures-util",
@@ -1630,7 +1630,7 @@ dependencies = [
 [[package]]
 name = "nasty-common"
 version = "0.0.13"
-source = "git+https://github.com/bresilla/nasty?branch=nastty#3a0d77315a6996a0e2d02c46d3da3ea4f4030189"
+source = "git+https://github.com/bresilla/nasty?branch=nastty#bf4ea74ad431ba15f8e6cbaa1e3305e615f44d54"
 dependencies = [
  "base64",
  "schemars",
@@ -1646,7 +1646,7 @@ dependencies = [
 [[package]]
 name = "nasty-sharing"
 version = "0.0.13"
-source = "git+https://github.com/bresilla/nasty?branch=nastty#3a0d77315a6996a0e2d02c46d3da3ea4f4030189"
+source = "git+https://github.com/bresilla/nasty?branch=nastty#bf4ea74ad431ba15f8e6cbaa1e3305e615f44d54"
 dependencies = [
  "nasty-common",
  "schemars",
@@ -1661,7 +1661,7 @@ dependencies = [
 [[package]]
 name = "nasty-snapshot"
 version = "0.0.13"
-source = "git+https://github.com/bresilla/nasty?branch=nastty#3a0d77315a6996a0e2d02c46d3da3ea4f4030189"
+source = "git+https://github.com/bresilla/nasty?branch=nastty#bf4ea74ad431ba15f8e6cbaa1e3305e615f44d54"
 dependencies = [
  "nasty-storage",
 ]
@@ -1669,7 +1669,7 @@ dependencies = [
 [[package]]
 name = "nasty-storage"
 version = "0.0.13"
-source = "git+https://github.com/bresilla/nasty?branch=nastty#3a0d77315a6996a0e2d02c46d3da3ea4f4030189"
+source = "git+https://github.com/bresilla/nasty?branch=nastty#bf4ea74ad431ba15f8e6cbaa1e3305e615f44d54"
 dependencies = [
  "libc",
  "nasty-common",
@@ -1686,7 +1686,7 @@ dependencies = [
 [[package]]
 name = "nasty-system"
 version = "0.0.13"
-source = "git+https://github.com/bresilla/nasty?branch=nastty#3a0d77315a6996a0e2d02c46d3da3ea4f4030189"
+source = "git+https://github.com/bresilla/nasty?branch=nastty#bf4ea74ad431ba15f8e6cbaa1e3305e615f44d54"
 dependencies = [
  "base64",
  "bcrypt",
@@ -2715,7 +2715,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "32497e9a4c7b38532efcdebeef879707aa9f794296a4f0244f6f69e9bc8574bd"
 dependencies = [
  "fastrand",
- "getrandom 0.4.3",
+ "getrandom 0.3.4",
  "once_cell",
  "rustix 1.1.4",
  "windows-sys 0.61.2",
