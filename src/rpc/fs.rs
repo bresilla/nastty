@@ -323,8 +323,13 @@ async fn btrfs_route(req: &Request, state: &AppState, session: &Session) -> Opti
             }
             Some(ok(req, merged))
         }
-        // Creation picks the backend from an optional `backend` param.
-        "fs.create" if str_param(req, "backend") == Some("btrfs") => {
+        // Creation picks the backend from an optional `backend` param;
+        // without one, btrfs is the default on hosts that have no
+        // bcachefs-tools (nothing else could succeed there anyway).
+        "fs.create"
+            if str_param(req, "backend") == Some("btrfs")
+                || (str_param(req, "backend").is_none() && !state.bcachefs_available) =>
+        {
             match parse_params::<nasty_storage::btrfs::CreateBtrfsRequest>(req) {
                 Ok(p) => match state.btrfs.create(p).await {
                     Ok(v) => Some(ok(req, v)),
