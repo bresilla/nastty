@@ -52,6 +52,12 @@ make serve                 # cargo run --bin nasttyd
 nasttyd --listen 127.0.0.1:2137
 ```
 
+**bcachefs-tools is required**: the server refuses to start without it and
+tells you where to get it. To develop the API/TUI on a machine that isn't
+the NAS, pass `--allow-missing-deps`. At startup a dependency check also
+warns (non-fatally) about missing kernel bcachefs support, NFS/Samba
+packages, and absent state directories — each with the command to fix it.
+
 First run creates user `admin` / password `admin` with a forced password
 change: every RPC except `auth.change_password` / `auth.me` / `auth.logout`
 returns "Password change required" until you change it.

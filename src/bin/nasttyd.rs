@@ -25,7 +25,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     tracing_subscriber::fmt().with_env_filter(filter).init();
 
     info!("nasttyd {} starting", env!("CARGO_PKG_VERSION"));
-    doctor();
+    if let Err(e) = doctor(config.allow_missing_deps) {
+        eprintln!("\n{e}\n");
+        std::process::exit(1);
+    }
     let state = Arc::new(AppState::new().await);
 
     // Startup restore — trimmed version of the upstream engine's boot
@@ -39,10 +42,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-/// Startup dependency check: warn loudly about anything missing that
-/// limits functionality, with the command to fix it. Nothing here is
-/// fatal — the API works and degrades per capability.
-fn doctor() {
+/// Startup dependency check. bcachefs-tools is the core of this NAS —
+/// without it the server refuses to start (override with
+/// `--allow-missing-deps` for API/TUI development on a non-NAS box).
+/// Everything else warns with the command to fix it and degrades per
+/// capability.
+fn doctor(allow_missing_deps: bool) -> Result<(), String> {
     let have = |bin: &str| {
         std::env::var_os("PATH")
             .map(|paths| std::env::split_paths(&paths).any(|p| p.join(bin).is_file()))
@@ -50,10 +55,17 @@ fn doctor() {
     };
 
     if !have("bcachefs") {
-        warn!(
-            "bcachefs-tools NOT installed — fs.create/mount/unlock will fail. \
-             Ubuntu has no package; build from https://github.com/koverstreet/bcachefs-tools"
-        );
+        if !allow_missing_deps {
+            return Err(
+                "error: bcachefs-tools is not installed — nastty is a bcachefs NAS and cannot \
+                 work without it.\n\
+                 Ubuntu ships no package; build it from source:\n\
+                 \x20   https://github.com/koverstreet/bcachefs-tools\n\
+                 (or start with --allow-missing-deps to develop the API/TUI on this machine)"
+                    .to_string(),
+            );
+        }
+        warn!("bcachefs-tools NOT installed — running in dev mode (--allow-missing-deps)");
     }
     let kernel_bcachefs = std::fs::read_to_string("/proc/filesystems")
         .map(|s| s.contains("bcachefs"))
@@ -83,6 +95,7 @@ fn doctor() {
             "/fs does not exist — filesystem mounts and share paths live there (sudo mkdir -p /fs)"
         );
     }
+    Ok(())
 }
 
 async fn restore(state: Arc<AppState>) {

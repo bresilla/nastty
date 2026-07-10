@@ -9,6 +9,9 @@ pub const DEFAULT_LISTEN: &str = "127.0.0.1:2137";
 #[derive(Debug, Clone)]
 pub struct Config {
     pub listen: SocketAddr,
+    /// Start even when required tooling (bcachefs) is missing — for
+    /// developing the API/TUI on machines that aren't the NAS.
+    pub allow_missing_deps: bool,
 }
 
 pub enum CliAction {
@@ -25,16 +28,18 @@ pub fn parse_args(args: &[String]) -> Result<CliAction, String> {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!(
             "nasttyd — thin local NAS API server built on the nasty crates\n\n\
-             USAGE: nasttyd [--listen ADDR]\n\n\
+             USAGE: nasttyd [--listen ADDR] [--allow-missing-deps]\n\n\
              OPTIONS:\n\
-             \x20 --listen ADDR   listen address (default {DEFAULT_LISTEN})\n\
-             \x20 -V, --version   print version\n\
-             \x20 -h, --help      show this help"
+             \x20 --listen ADDR         listen address (default {DEFAULT_LISTEN})\n\
+             \x20 --allow-missing-deps  start even without bcachefs (development only)\n\
+             \x20 -V, --version         print version\n\
+             \x20 -h, --help            show this help"
         );
         return Ok(CliAction::Exit);
     }
 
     let mut listen: SocketAddr = DEFAULT_LISTEN.parse().expect("default listen must parse");
+    let mut allow_missing_deps = false;
     let mut iter = args.iter().skip(1);
     while let Some(arg) = iter.next() {
         match arg.as_str() {
@@ -46,11 +51,15 @@ pub fn parse_args(args: &[String]) -> Result<CliAction, String> {
                     .parse()
                     .map_err(|e| format!("invalid --listen address '{value}': {e}"))?;
             }
+            "--allow-missing-deps" => allow_missing_deps = true,
             other => return Err(format!("unknown argument: {other}")),
         }
     }
 
-    Ok(CliAction::Run(Config { listen }))
+    Ok(CliAction::Run(Config {
+        listen,
+        allow_missing_deps,
+    }))
 }
 
 #[cfg(test)]
