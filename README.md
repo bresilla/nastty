@@ -56,6 +56,11 @@ First run creates user `admin` / password `admin` with a forced password
 change: every RPC except `auth.change_password` / `auth.me` / `auth.logout`
 returns "Password change required" until you change it.
 
+Unlike the upstream appliance, `nasttyd` never touches system services at
+startup — no `systemctl start` storm (and no polkit prompts when running
+unprivileged). Services are only started/stopped when you explicitly toggle
+a protocol; use `systemctl enable <svc>` if you want one to start at boot.
+
 ## Talk to it
 
 ```sh
