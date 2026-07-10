@@ -263,4 +263,136 @@ impl AuthService {
         info!("password changed for user '{username}'");
         Ok(())
     }
+
+    // ── user management (admin) ─────────────────────────────────
+
+    pub async fn list_users(&self) -> Vec<UserInfo> {
+        self.state
+            .read()
+            .await
+            .users
+            .iter()
+            .map(|u| UserInfo {
+                username: u.username.clone(),
+                role: u.role.clone(),
+                must_change_password: u.must_change_password,
+            })
+            .collect()
+    }
+
+    pub async fn create_user(
+        &self,
+        username: &str,
+        password: &str,
+        role: Role,
+    ) -> Result<(), AuthError> {
+        if username.is_empty()
+            || username.len() > 32
+            || !username
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+        {
+            return Err(AuthError::Internal(
+                "username must be 1-32 alphanumeric/'-'/'_' characters".into(),
+            ));
+        }
+        if password.len() < 8 {
+            return Err(AuthError::Internal(
+                "password must be at least 8 characters".into(),
+            ));
+        }
+        {
+            let mut state = self.state.write().await;
+            if state.users.iter().any(|u| u.username == username) {
+                return Err(AuthError::Internal(format!(
+                    "user '{username}' already exists"
+                )));
+            }
+            state.users.push(User {
+                username: username.to_string(),
+                password_hash: hash_password(password)?,
+                role,
+                must_change_password: false,
+            });
+        }
+        if let Err(e) = self.save().await {
+            warn!("auth state not persisted: {e}");
+        }
+        info!("created user '{username}'");
+        Ok(())
+    }
+
+    pub async fn delete_user(&self, actor: &str, username: &str) -> Result<(), AuthError> {
+        if actor == username {
+            return Err(AuthError::Internal("cannot delete your own account".into()));
+        }
+        {
+            let mut state = self.state.write().await;
+            let target = state
+                .users
+                .iter()
+                .find(|u| u.username == username)
+                .ok_or(AuthError::UserNotFound)?;
+            // Never delete the last admin — that bricks the box.
+            if target.role == Role::Admin
+                && state.users.iter().filter(|u| u.role == Role::Admin).count() <= 1
+            {
+                return Err(AuthError::Internal(
+                    "cannot delete the last admin account".into(),
+                ));
+            }
+            state.users.retain(|u| u.username != username);
+        }
+        if let Err(e) = self.save().await {
+            warn!("auth state not persisted: {e}");
+        }
+        // Revoke every session the deleted user had.
+        self.sessions
+            .write()
+            .await
+            .retain(|s| s.username != username);
+        info!("deleted user '{username}'");
+        Ok(())
+    }
+
+    /// Admin reset of another user's password: no old password needed,
+    /// forces a change on their next login, and revokes their sessions.
+    pub async fn admin_set_password(
+        &self,
+        username: &str,
+        new_password: &str,
+    ) -> Result<(), AuthError> {
+        if new_password.len() < 8 {
+            return Err(AuthError::Internal(
+                "new password must be at least 8 characters".into(),
+            ));
+        }
+        {
+            let mut state = self.state.write().await;
+            let user = state
+                .users
+                .iter_mut()
+                .find(|u| u.username == username)
+                .ok_or(AuthError::UserNotFound)?;
+            user.password_hash = hash_password(new_password)?;
+            user.must_change_password = true;
+        }
+        if let Err(e) = self.save().await {
+            warn!("auth state not persisted: {e}");
+        }
+        self.sessions
+            .write()
+            .await
+            .retain(|s| s.username != username);
+        info!("password reset for user '{username}'");
+        Ok(())
+    }
+}
+
+/// Public listing shape — never exposes password hashes.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct UserInfo {
+    pub username: String,
+    pub role: Role,
+    pub must_change_password: bool,
 }
