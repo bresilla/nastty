@@ -13,14 +13,13 @@ pub const MUTED: Color = Color::Rgb(0x6c, 0x70, 0x86);
 pub const SURFACE: Color = Color::Rgb(0x31, 0x32, 0x44);
 pub const SURFACE_LO: Color = Color::Rgb(0x24, 0x25, 0x34);
 
-pub const ACCENT: Color = Color::Rgb(0x89, 0xdc, 0xeb); // sky
-pub const MAUVE: Color = Color::Rgb(0xcb, 0xa6, 0xf7);
+pub const ACCENT: Color = Color::Indexed(1);
+pub const MAUVE: Color = Color::Indexed(5);
 pub const GREEN: Color = Color::Rgb(0xa6, 0xe3, 0xa1);
 pub const RED: Color = Color::Rgb(0xf3, 0x8b, 0xa8);
 pub const YELLOW: Color = Color::Rgb(0xf9, 0xe2, 0xaf);
 pub const PEACH: Color = Color::Rgb(0xfa, 0xb3, 0x87);
 pub const BLUE: Color = Color::Rgb(0x89, 0xb4, 0xfa);
-pub const TEAL: Color = Color::Rgb(0x94, 0xe2, 0xd5);
 
 // ── styles ──────────────────────────────────────────────────────
 

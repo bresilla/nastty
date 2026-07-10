@@ -54,6 +54,7 @@ pub(super) struct App {
     pub smb: Vec<Value>,
     pub protocols: Vec<Value>,
     pub status: String,
+    pub show_help: bool,
     should_quit: bool,
 }
 
@@ -73,6 +74,7 @@ impl App {
             smb: Vec::new(),
             protocols: Vec::new(),
             status: "loading…".to_string(),
+            show_help: false,
             should_quit: false,
         }
     }
@@ -147,6 +149,23 @@ pub(super) async fn run_app(
 async fn handle_input(app: &mut App, ev: Event, write: &mut WsWrite) {
     let Event::Key(key) = ev else { return };
     if key.kind != KeyEventKind::Press {
+        return;
+    }
+
+    if key.code == KeyCode::Char('?') {
+        app.show_help = !app.show_help;
+        return;
+    }
+
+    if app.show_help {
+        match key.code {
+            KeyCode::Esc => app.show_help = false,
+            KeyCode::Char('q') => app.should_quit = true,
+            KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                app.should_quit = true
+            }
+            _ => {}
+        }
         return;
     }
 

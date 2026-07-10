@@ -2,10 +2,10 @@
 //! can be exercised with ratatui's `TestBackend`.
 
 use ratatui::Frame;
-use ratatui::layout::{Alignment, Constraint, Layout, Rect};
+use ratatui::layout::{Alignment, Constraint, Flex, Layout, Rect};
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span, Text};
-use ratatui::widgets::{Cell, Paragraph, Row, Table, TableState, Tabs};
+use ratatui::widgets::{Cell, Clear, Paragraph, Row, Table, TableState, Tabs};
 use serde_json::Value;
 
 use super::app::{App, TABS};
@@ -14,12 +14,7 @@ use super::theme;
 const TAB_ICONS: [&str; 6] = ["⌂", "⛁", "▤", "▦", "⇄", "☰"];
 
 pub(super) fn render_app(f: &mut Frame, app: &App) {
-    let chunks = Layout::vertical([
-        Constraint::Length(3),
-        Constraint::Min(0),
-        Constraint::Length(1),
-    ])
-    .split(f.area());
+    let chunks = Layout::vertical([Constraint::Length(3), Constraint::Min(0)]).split(f.area());
 
     render_tabs(f, chunks[0], app);
     match app.tab {
@@ -30,7 +25,9 @@ pub(super) fn render_app(f: &mut Frame, app: &App) {
         5 => render_protocols(f, chunks[1], app),
         _ => render_overview(f, chunks[1], app),
     }
-    render_footer(f, chunks[2], app);
+    if app.show_help {
+        render_help_popup(f, f.area());
+    }
 }
 
 // ── header ──────────────────────────────────────────────────────
@@ -44,32 +41,39 @@ fn render_tabs(f: &mut Frame, area: Rect, app: &App) {
         .map(|(name, icon)| {
             Line::from(vec![
                 Span::raw(" "),
-                Span::styled(format!("{icon} "), Style::default().fg(theme::TEAL)),
+                Span::styled(format!("{icon} "), Style::default().fg(theme::ACCENT)),
                 Span::styled(*name, theme::subtle()),
                 Span::raw(" "),
             ])
         })
         .collect();
 
-    let who = if app.username.is_empty() {
-        String::new()
+    let mut right = vec![if app.connected {
+        Span::styled("● ", Style::default().fg(theme::GREEN))
     } else {
-        format!(" {} · {} ", app.username, app.role)
-    };
+        Span::styled("● ", Style::default().fg(theme::RED))
+    }];
+    right.push(Span::styled(app.status.clone(), theme::dim()));
+    if !app.username.is_empty() {
+        right.push(Span::styled(
+            format!(" · {} · {} ", app.username, app.role),
+            theme::dim(),
+        ));
+    }
 
     let block = theme::panel_bare()
         .title(Line::from(vec![
             Span::styled(" ⬢ ", Style::default().fg(theme::ACCENT)),
             Span::styled("nastty ", theme::title()),
         ]))
-        .title(Line::from(Span::styled(who, theme::dim())).right_aligned());
+        .title(Line::from(right).right_aligned());
 
     let tabs = Tabs::new(titles)
         .select(app.tab)
         .block(block)
         .highlight_style(
             Style::default()
-                .fg(theme::SURFACE_LO)
+                .fg(theme::TEXT)
                 .bg(theme::ACCENT)
                 .add_modifier(Modifier::BOLD),
         )
@@ -108,11 +112,30 @@ fn render_system_card(f: &mut Frame, area: Rect, app: &App) {
         kv("timezone", &field(&info, "timezone")),
         Line::from(""),
         kv("engine", &field(&info, "version")),
-        kv("bcachefs", &field(&info, "bcachefs_version")),
+        Line::from(vec![kv_key("bcachefs"), bcachefs_span(&info)]),
         kv("kvm", &field(&info, "kvm_available")),
     ];
 
     f.render_widget(Paragraph::new(lines).block(theme::panel("system")), area);
+}
+
+/// True when the server reports a usable bcachefs (kernel module probed).
+fn bcachefs_available(info: &Value) -> bool {
+    matches!(
+        info.get("bcachefs_version").and_then(|v| v.as_str()),
+        Some(v) if v != "unknown" && !v.is_empty()
+    )
+}
+
+fn bcachefs_span(info: &Value) -> Span<'static> {
+    if bcachefs_available(info) {
+        Span::styled(field(info, "bcachefs_version"), theme::text())
+    } else {
+        Span::styled(
+            "✗ not available — install bcachefs-tools + kernel module",
+            Style::default().fg(theme::RED),
+        )
+    }
 }
 
 fn render_stat_tiles(f: &mut Frame, area: Rect, app: &App) {
@@ -148,7 +171,7 @@ fn render_stat_tiles(f: &mut Frame, area: Rect, app: &App) {
         bottom[0],
         "shares",
         &(app.nfs.len() + app.smb.len()).to_string(),
-        theme::TEAL,
+        theme::ACCENT,
     );
     stat_tile(
         f,
@@ -246,7 +269,6 @@ fn render_devices(f: &mut Frame, area: Rect, app: &App) {
                 }),
             ])
             .height(2)
-            .bottom_margin(1)
         })
         .collect();
     render_table(
@@ -267,6 +289,14 @@ fn render_devices(f: &mut Frame, area: Rect, app: &App) {
 }
 
 fn render_filesystems(f: &mut Frame, area: Rect, app: &App) {
+    // The empty state tells the truth: without bcachefs on the host there
+    // is nothing to create filesystems WITH.
+    let empty_text = match &app.system_info {
+        Some(info) if !bcachefs_available(info) => {
+            "bcachefs not available on this host — install bcachefs-tools and the kernel module (see README)"
+        }
+        _ => "no filesystems — create one with fs.create",
+    };
     let rows: Vec<Row> = app
         .filesystems
         .iter()
@@ -281,7 +311,6 @@ fn render_filesystems(f: &mut Frame, area: Rect, app: &App) {
                 cell1(Span::styled(field(fs, "state"), theme::subtle())),
             ])
             .height(2)
-            .bottom_margin(1)
         })
         .collect();
     render_table(
@@ -296,7 +325,7 @@ fn render_filesystems(f: &mut Frame, area: Rect, app: &App) {
         ],
         rows,
         app.selected,
-        "no filesystems — create one with fs.create",
+        empty_text,
     );
 }
 
@@ -312,7 +341,7 @@ fn render_subvolumes(f: &mut Frame, area: Rect, app: &App) {
                 ),
                 cell1(Span::styled(
                     any(s, &["subvolume_type", "type", "kind"]),
-                    Style::default().fg(theme::TEAL),
+                    Style::default().fg(theme::ACCENT),
                 )),
                 cell1(Span::styled(
                     bytes(s.get("used_bytes").or_else(|| s.get("size_bytes"))),
@@ -320,7 +349,6 @@ fn render_subvolumes(f: &mut Frame, area: Rect, app: &App) {
                 )),
             ])
             .height(2)
-            .bottom_margin(1)
         })
         .collect();
     render_table(
@@ -352,7 +380,6 @@ fn render_shares(f: &mut Frame, area: Rect, app: &App) {
                 secondary(field(s, "id")),
             )])
             .height(2)
-            .bottom_margin(1)
         })
         .collect();
     render_table(
@@ -375,7 +402,6 @@ fn render_shares(f: &mut Frame, area: Rect, app: &App) {
                 cell1(Span::styled(field(s, "path"), theme::subtle())),
             ])
             .height(2)
-            .bottom_margin(1)
         })
         .collect();
     render_table(
@@ -406,7 +432,6 @@ fn render_protocols(f: &mut Frame, area: Rect, app: &App) {
                 cell1(theme::badge(running, "running", "stopped")),
             ])
             .height(2)
-            .bottom_margin(1)
         })
         .collect();
     render_table(
@@ -484,32 +509,45 @@ fn render_table(
     }
 }
 
-fn render_footer(f: &mut Frame, area: Rect, app: &App) {
-    let cols = Layout::horizontal([Constraint::Fill(1), Constraint::Length(40)]).split(area);
+fn render_help_popup(f: &mut Frame, area: Rect) {
+    let [outer] = Layout::vertical([Constraint::Length(15)])
+        .flex(Flex::Center)
+        .areas(area);
+    let [popup] = Layout::horizontal([Constraint::Length(64)])
+        .flex(Flex::Center)
+        .areas(outer);
 
-    let hints = [
-        theme::chip("1-6", "tabs"),
-        theme::chip("↑↓", "move"),
-        theme::chip("↵", "toggle"),
-        theme::chip("r", "refresh"),
-        theme::chip("q", "quit"),
-    ]
-    .concat();
-    f.render_widget(Paragraph::new(Line::from(hints)), cols[0]);
+    f.render_widget(Clear, popup);
 
-    let dot = if app.connected {
-        Span::styled("● ", Style::default().fg(theme::GREEN))
-    } else {
-        Span::styled("● ", Style::default().fg(theme::RED))
-    };
+    let lines = vec![
+        shortcut("?", "show / close this help"),
+        shortcut("1-6", "jump to tab"),
+        shortcut("tab / shift-tab", "next / previous tab"),
+        shortcut("← →  h l", "switch tabs"),
+        shortcut("↑ ↓  k j", "move selection"),
+        shortcut("r", "refresh all data"),
+        shortcut("enter", "toggle selected protocol on Protocols tab"),
+        shortcut("q", "quit"),
+        shortcut("ctrl-c", "quit immediately"),
+        shortcut("esc", "close help, or quit when help is closed"),
+    ];
+
     f.render_widget(
-        Paragraph::new(Line::from(vec![
-            dot,
-            Span::styled(app.status.clone(), theme::dim()),
-        ]))
-        .alignment(Alignment::Right),
-        cols[1],
+        Paragraph::new(lines)
+            .block(theme::panel("shortcuts"))
+            .alignment(Alignment::Left),
+        popup,
     );
+}
+
+fn shortcut<'a>(key: &'a str, desc: &'a str) -> Line<'a> {
+    Line::from(vec![
+        Span::styled(
+            format!("{key:<17}"),
+            theme::label().add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(desc, theme::text()),
+    ])
 }
 
 // ── value helpers ───────────────────────────────────────────────
@@ -639,7 +677,20 @@ mod tests {
         assert!(text.contains("protocols"), "tab title missing");
         assert!(text.contains("NFS"), "protocol row missing");
         assert!(text.contains("enabled"), "enabled badge missing");
-        assert!(text.contains("quit"), "footer help missing");
+        assert!(!text.contains("shortcuts"), "help popup should be hidden");
+    }
+
+    #[test]
+    fn renders_help_popup_when_requested() {
+        let mut app = App::for_test();
+        app.show_help = true;
+        let text = buffer_text(&app, 100, 24);
+        assert!(text.contains("shortcuts"), "help title missing");
+        assert!(
+            text.contains("refresh all data"),
+            "refresh shortcut missing"
+        );
+        assert!(text.contains("quit"), "quit shortcut missing");
     }
 
     #[test]

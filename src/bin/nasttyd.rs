@@ -25,6 +25,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     tracing_subscriber::fmt().with_env_filter(filter).init();
 
     info!("nasttyd {} starting", env!("CARGO_PKG_VERSION"));
+    doctor();
     let state = Arc::new(AppState::new().await);
 
     // Startup restore — trimmed version of the upstream engine's boot
@@ -36,6 +37,52 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     nastty::server::serve(config.listen, state).await?;
     Ok(())
+}
+
+/// Startup dependency check: warn loudly about anything missing that
+/// limits functionality, with the command to fix it. Nothing here is
+/// fatal — the API works and degrades per capability.
+fn doctor() {
+    let have = |bin: &str| {
+        std::env::var_os("PATH")
+            .map(|paths| std::env::split_paths(&paths).any(|p| p.join(bin).is_file()))
+            .unwrap_or(false)
+    };
+
+    if !have("bcachefs") {
+        warn!(
+            "bcachefs-tools NOT installed — fs.create/mount/unlock will fail. \
+             Ubuntu has no package; build from https://github.com/koverstreet/bcachefs-tools"
+        );
+    }
+    let kernel_bcachefs = std::fs::read_to_string("/proc/filesystems")
+        .map(|s| s.contains("bcachefs"))
+        .unwrap_or(false);
+    if !kernel_bcachefs {
+        warn!(
+            "kernel has NO bcachefs support (not in /proc/filesystems) — mounts will fail. \
+             Install the out-of-tree bcachefs module for your kernel"
+        );
+    }
+    if !have("exportfs") {
+        warn!(
+            "nfs-kernel-server NOT installed — NFS shares unavailable (sudo apt install nfs-kernel-server)"
+        );
+    }
+    if !have("smbd") {
+        warn!("samba NOT installed — SMB shares unavailable (sudo apt install samba)");
+    }
+    if !std::path::Path::new("/var/lib/nasty").is_dir() {
+        warn!(
+            "/var/lib/nasty does not exist — users, protocol state, and share configs will NOT \
+             persist across restarts (sudo mkdir -p /var/lib/nasty && sudo chown $USER /var/lib/nasty)"
+        );
+    }
+    if !std::path::Path::new("/fs").is_dir() {
+        warn!(
+            "/fs does not exist — filesystem mounts and share paths live there (sudo mkdir -p /fs)"
+        );
+    }
 }
 
 async fn restore(state: Arc<AppState>) {
