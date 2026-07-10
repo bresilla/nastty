@@ -389,12 +389,18 @@ fn field_line<'a>(label: &'a str, value: &str, secret: bool, focused: bool) -> P
     } else {
         Span::raw("")
     };
-    Paragraph::new(Line::from(vec![
+    let p = Paragraph::new(Line::from(vec![
         Span::styled(marker, Style::default().fg(theme::ACCENT)),
         Span::styled(format!("{label}  "), theme::label()),
         Span::styled(shown, value_style),
         cursor,
-    ]))
+    ]));
+    // The focused field tints as one whole block, edge to edge.
+    if focused {
+        p.style(Style::default().bg(theme::SURFACE))
+    } else {
+        p
+    }
 }
 
 fn status_line<'a>(status: &str, error: bool, busy: bool) -> Paragraph<'a> {

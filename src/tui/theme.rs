@@ -50,19 +50,10 @@ pub fn table_header() -> Style {
         .add_modifier(Modifier::BOLD | Modifier::UNDERLINED)
 }
 
+/// Whole-card selection: a background tint over every line of the row,
+/// leaving each span's own foreground color intact.
 pub fn selected_row() -> Style {
-    Style::default()
-        .bg(SURFACE)
-        .fg(TEXT)
-        .add_modifier(Modifier::BOLD)
-}
-
-pub fn zebra(i: usize) -> Style {
-    if i % 2 == 1 {
-        Style::default().bg(SURFACE_LO)
-    } else {
-        Style::default()
-    }
+    Style::default().bg(SURFACE)
 }
 
 // ── blocks ──────────────────────────────────────────────────────

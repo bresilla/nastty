@@ -4,7 +4,7 @@
 use ratatui::Frame;
 use ratatui::layout::{Alignment, Constraint, Layout, Rect};
 use ratatui::style::{Modifier, Style};
-use ratatui::text::{Line, Span};
+use ratatui::text::{Line, Span, Text};
 use ratatui::widgets::{Cell, Paragraph, Row, Table, TableState, Tabs};
 use serde_json::Value;
 
@@ -36,13 +36,17 @@ pub(super) fn render_app(f: &mut Frame, app: &App) {
 // ── header ──────────────────────────────────────────────────────
 
 fn render_tabs(f: &mut Frame, area: Rect, app: &App) {
+    // Each tab is padded inside so the selection pill has air around the
+    // icon and label: " ⌂ Overview ".
     let titles: Vec<Line> = TABS
         .iter()
         .zip(TAB_ICONS)
         .map(|(name, icon)| {
             Line::from(vec![
+                Span::raw(" "),
                 Span::styled(format!("{icon} "), Style::default().fg(theme::TEAL)),
                 Span::styled(*name, theme::subtle()),
+                Span::raw(" "),
             ])
         })
         .collect();
@@ -184,49 +188,77 @@ fn stat_tile(f: &mut Frame, area: Rect, caption: &str, value: &str, color: ratat
     );
 }
 
+// ── two-line card cells ─────────────────────────────────────────
+
+/// A cell with a primary line and a dim secondary line underneath.
+/// Both lines get a leading space so card content never touches the
+/// selection edge.
+fn cell2<'a>(primary: Span<'a>, secondary: Span<'a>) -> Cell<'a> {
+    Cell::from(Text::from(vec![
+        Line::from(vec![Span::raw(" "), primary]),
+        Line::from(vec![Span::raw(" "), secondary]),
+    ]))
+}
+
+/// A single-line cell, vertically padded to match `cell2` rows.
+fn cell1<'a>(content: Span<'a>) -> Cell<'a> {
+    Cell::from(Text::from(vec![Line::from(vec![Span::raw(" "), content])]))
+}
+
+fn primary(s: String) -> Span<'static> {
+    Span::styled(s, theme::text().add_modifier(Modifier::BOLD))
+}
+
+fn secondary(s: String) -> Span<'static> {
+    Span::styled(s, theme::dim())
+}
+
 // ── data tabs ───────────────────────────────────────────────────
 
 fn render_devices(f: &mut Frame, area: Rect, app: &App) {
     let rows: Vec<Row> = app
         .devices
         .iter()
-        .enumerate()
-        .map(|(i, d)| {
+        .map(|d| {
             let class = field(d, "device_class");
             let in_use = d.get("in_use").and_then(|v| v.as_bool()).unwrap_or(false);
             Row::new(vec![
-                Cell::from(Span::styled(field(d, "path"), theme::text())),
-                Cell::from(Span::styled(
-                    class.clone(),
-                    Style::default().fg(theme::device_class_color(&class)),
-                )),
-                Cell::from(Span::styled(field(d, "dev_type"), theme::subtle())),
-                Cell::from(
-                    Line::from(Span::styled(bytes(d.get("size_bytes")), theme::text()))
-                        .right_aligned(),
+                cell2(
+                    primary(field(d, "path")),
+                    secondary(format!("{} · {}", field(d, "model"), field(d, "serial"))),
                 ),
-                Cell::from(Span::styled(field(d, "model"), theme::subtle())),
-                Cell::from(Line::from(if in_use {
+                cell2(
+                    Span::styled(
+                        class.clone(),
+                        Style::default().fg(theme::device_class_color(&class)),
+                    ),
+                    secondary(format!(
+                        "{} · {}",
+                        field(d, "dev_type"),
+                        field(d, "transport")
+                    )),
+                ),
+                cell1(Span::styled(bytes(d.get("size_bytes")), theme::text())),
+                cell1(if in_use {
                     Span::styled("● in use", Style::default().fg(theme::PEACH))
                 } else {
                     Span::styled("○ free", Style::default().fg(theme::GREEN))
-                })),
+                }),
             ])
-            .style(theme::zebra(i))
+            .height(2)
+            .bottom_margin(1)
         })
         .collect();
     render_table(
         f,
         area,
         &format!("devices ({})", app.devices.len()),
-        &["device", "class", "type", "size", "model", "state"],
+        &["device", "class", "size", "state"],
         &[
+            Constraint::Min(30),
             Constraint::Length(18),
-            Constraint::Length(7),
-            Constraint::Length(6),
-            Constraint::Length(10),
-            Constraint::Min(14),
-            Constraint::Length(10),
+            Constraint::Length(11),
+            Constraint::Length(11),
         ],
         rows,
         app.selected,
@@ -238,28 +270,29 @@ fn render_filesystems(f: &mut Frame, area: Rect, app: &App) {
     let rows: Vec<Row> = app
         .filesystems
         .iter()
-        .enumerate()
-        .map(|(i, fs)| {
+        .map(|fs| {
             let mounted = fs.get("mounted").and_then(|v| v.as_bool()).unwrap_or(false);
             Row::new(vec![
-                Cell::from(Span::styled(field(fs, "name"), theme::text())),
-                Cell::from(Line::from(theme::badge(mounted, "mounted", "unmounted"))),
-                Cell::from(Span::styled(field(fs, "mount_point"), theme::subtle())),
-                Cell::from(Span::styled(field(fs, "state"), theme::subtle())),
+                cell2(
+                    primary(field(fs, "name")),
+                    secondary(field(fs, "mount_point")),
+                ),
+                cell1(theme::badge(mounted, "mounted", "unmounted")),
+                cell1(Span::styled(field(fs, "state"), theme::subtle())),
             ])
-            .style(theme::zebra(i))
+            .height(2)
+            .bottom_margin(1)
         })
         .collect();
     render_table(
         f,
         area,
         &format!("filesystems ({})", app.filesystems.len()),
-        &["name", "status", "mount point", "state"],
+        &["filesystem", "status", "state"],
         &[
-            Constraint::Min(14),
-            Constraint::Length(12),
-            Constraint::Length(24),
-            Constraint::Length(12),
+            Constraint::Min(30),
+            Constraint::Length(14),
+            Constraint::Length(14),
         ],
         rows,
         app.selected,
@@ -271,35 +304,33 @@ fn render_subvolumes(f: &mut Frame, area: Rect, app: &App) {
     let rows: Vec<Row> = app
         .subvolumes
         .iter()
-        .enumerate()
-        .map(|(i, s)| {
+        .map(|s| {
             Row::new(vec![
-                Cell::from(Span::styled(field(s, "filesystem"), theme::subtle())),
-                Cell::from(Span::styled(field(s, "name"), theme::text())),
-                Cell::from(Span::styled(
+                cell2(
+                    primary(field(s, "name")),
+                    secondary(format!("on {}", field(s, "filesystem"))),
+                ),
+                cell1(Span::styled(
                     any(s, &["subvolume_type", "type", "kind"]),
                     Style::default().fg(theme::TEAL),
                 )),
-                Cell::from(
-                    Line::from(Span::styled(
-                        bytes(s.get("used_bytes").or_else(|| s.get("size_bytes"))),
-                        theme::text(),
-                    ))
-                    .right_aligned(),
-                ),
+                cell1(Span::styled(
+                    bytes(s.get("used_bytes").or_else(|| s.get("size_bytes"))),
+                    theme::text(),
+                )),
             ])
-            .style(theme::zebra(i))
+            .height(2)
+            .bottom_margin(1)
         })
         .collect();
     render_table(
         f,
         area,
         &format!("subvolumes ({})", app.subvolumes.len()),
-        &["filesystem", "name", "type", "used"],
+        &["subvolume", "type", "used"],
         &[
-            Constraint::Length(16),
-            Constraint::Min(14),
-            Constraint::Length(12),
+            Constraint::Min(30),
+            Constraint::Length(14),
             Constraint::Length(12),
         ],
         rows,
@@ -315,21 +346,21 @@ fn render_shares(f: &mut Frame, area: Rect, app: &App) {
     let nfs_rows: Vec<Row> = app
         .nfs
         .iter()
-        .enumerate()
-        .map(|(i, s)| {
-            Row::new(vec![
-                Cell::from(Span::styled(field(s, "id"), theme::subtle())),
-                Cell::from(Span::styled(field(s, "path"), theme::text())),
-            ])
-            .style(theme::zebra(i))
+        .map(|s| {
+            Row::new(vec![cell2(
+                primary(field(s, "path")),
+                secondary(field(s, "id")),
+            )])
+            .height(2)
+            .bottom_margin(1)
         })
         .collect();
     render_table(
         f,
         halves[0],
         &format!("nfs shares ({})", app.nfs.len()),
-        &["id", "path"],
-        &[Constraint::Length(24), Constraint::Min(20)],
+        &["export"],
+        &[Constraint::Min(30)],
         nfs_rows,
         usize::MAX, // no selection on shares view
         "no NFS shares",
@@ -338,26 +369,21 @@ fn render_shares(f: &mut Frame, area: Rect, app: &App) {
     let smb_rows: Vec<Row> = app
         .smb
         .iter()
-        .enumerate()
-        .map(|(i, s)| {
+        .map(|s| {
             Row::new(vec![
-                Cell::from(Span::styled(field(s, "id"), theme::subtle())),
-                Cell::from(Span::styled(any(s, &["name"]), theme::text())),
-                Cell::from(Span::styled(field(s, "path"), theme::text())),
+                cell2(primary(any(s, &["name"])), secondary(field(s, "id"))),
+                cell1(Span::styled(field(s, "path"), theme::subtle())),
             ])
-            .style(theme::zebra(i))
+            .height(2)
+            .bottom_margin(1)
         })
         .collect();
     render_table(
         f,
         halves[1],
         &format!("smb shares ({})", app.smb.len()),
-        &["id", "name", "path"],
-        &[
-            Constraint::Length(24),
-            Constraint::Length(18),
-            Constraint::Min(20),
-        ],
+        &["share", "path"],
+        &[Constraint::Length(28), Constraint::Min(24)],
         smb_rows,
         usize::MAX,
         "no SMB shares",
@@ -368,32 +394,30 @@ fn render_protocols(f: &mut Frame, area: Rect, app: &App) {
     let rows: Vec<Row> = app
         .protocols
         .iter()
-        .enumerate()
-        .map(|(i, p)| {
+        .map(|p| {
             let enabled = p.get("enabled").and_then(|v| v.as_bool()).unwrap_or(false);
             let running = p.get("running").and_then(|v| v.as_bool()).unwrap_or(false);
             Row::new(vec![
-                Cell::from(Span::styled(
-                    any(p, &["display_name", "name"]),
-                    theme::text(),
-                )),
-                Cell::from(Span::styled(field(p, "name"), theme::dim())),
-                Cell::from(Line::from(theme::badge(enabled, "enabled", "disabled"))),
-                Cell::from(Line::from(theme::badge(running, "running", "stopped"))),
+                cell2(
+                    primary(any(p, &["display_name", "name"])),
+                    secondary(field(p, "name")),
+                ),
+                cell1(theme::badge(enabled, "enabled", "disabled")),
+                cell1(theme::badge(running, "running", "stopped")),
             ])
-            .style(theme::zebra(i))
+            .height(2)
+            .bottom_margin(1)
         })
         .collect();
     render_table(
         f,
         area,
         "protocols — enter to toggle",
-        &["protocol", "key", "enabled", "service"],
+        &["protocol", "enabled", "service"],
         &[
-            Constraint::Min(16),
-            Constraint::Length(12),
-            Constraint::Length(12),
-            Constraint::Length(12),
+            Constraint::Min(24),
+            Constraint::Length(14),
+            Constraint::Length(14),
         ],
         rows,
         app.selected,
@@ -431,15 +455,25 @@ fn render_table(
         return;
     }
 
-    let header = Row::new(headers.iter().map(|h| Cell::from(*h)).collect::<Vec<_>>())
-        .style(theme::table_header())
-        .bottom_margin(1);
+    // Header labels get the same leading space as card content so
+    // columns line up.
+    let header = Row::new(
+        headers
+            .iter()
+            .map(|h| Cell::from(format!(" {h}")))
+            .collect::<Vec<_>>(),
+    )
+    .style(theme::table_header())
+    .bottom_margin(1);
     let table = Table::new(rows, widths.to_vec())
         .header(header)
         .block(block)
         .column_spacing(2)
         .row_highlight_style(theme::selected_row())
-        .highlight_symbol(Span::styled("▌ ", Style::default().fg(theme::ACCENT)));
+        .highlight_symbol(Text::from(vec![
+            Line::from(Span::styled("▌", Style::default().fg(theme::ACCENT))),
+            Line::from(Span::styled("▌", Style::default().fg(theme::ACCENT))),
+        ]));
 
     if selected == usize::MAX {
         f.render_widget(table, area);
@@ -637,6 +671,21 @@ mod tests {
         );
     }
 
+    #[test]
+    fn two_line_rows_show_secondary_info() {
+        let mut app = App::for_test();
+        app.tab = 1;
+        app.devices = vec![serde_json::json!({
+            "path":"/dev/sda","device_class":"ssd","dev_type":"disk",
+            "transport":"sata","size_bytes":1024u64,
+            "model":"AcmeDisk","serial":"SN123","in_use":false
+        })];
+        let text = buffer_text(&app, 110, 20);
+        assert!(text.contains("/dev/sda"), "primary line missing");
+        assert!(text.contains("AcmeDisk"), "secondary line missing");
+        assert!(text.contains("SN123"), "serial missing from secondary");
+    }
+
     /// Visual preview of each tab, for development. Run with:
     /// `cargo test --lib -- --ignored preview --nocapture`
     #[test]
@@ -656,17 +705,20 @@ mod tests {
         }));
         app.devices = vec![
             serde_json::json!({"path":"/dev/sda","device_class":"ssd","dev_type":"disk",
-                "size_bytes":4096805658624u64,"model":"TS4TSSD230S","in_use":false}),
+                "transport":"sata","size_bytes":4096805658624u64,
+                "model":"TS4TSSD230S","serial":"I216000111","in_use":false}),
             serde_json::json!({"path":"/dev/nvme0n1","device_class":"nvme","dev_type":"disk",
-                "size_bytes":2048408248320u64,"model":"Samsung 990 PRO","in_use":true}),
+                "transport":"nvme","size_bytes":2048408248320u64,
+                "model":"Samsung 990 PRO","serial":"S6Z1NJ0T","in_use":true}),
         ];
         app.protocols = vec![
             serde_json::json!({"name":"nfs","display_name":"NFS","enabled":true,"running":true}),
             serde_json::json!({"name":"smb","display_name":"SMB","enabled":false,"running":false}),
             serde_json::json!({"name":"ssh","display_name":"SSH","enabled":true,"running":true}),
         ];
+        app.selected = 1;
 
-        for tab in [0usize, 1, 5] {
+        for tab in [1usize, 5] {
             app.tab = tab;
             let mut terminal = Terminal::new(TestBackend::new(110, 26)).unwrap();
             terminal.draw(|f| render_app(f, &app)).unwrap();
