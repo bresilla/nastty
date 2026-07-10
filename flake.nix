@@ -83,6 +83,17 @@
             pkgs.mold
             pkgs.pkg-config
 
+            # NAS tooling nasttyd shells out to. These give the engine its
+            # userspace commands (bcachefs format/mount, exportfs, smbpasswd,
+            # smartctl). The NFS/SMB *daemons* still have to run as system
+            # services on the host (apt install nfs-kernel-server samba),
+            # and mounting bcachefs needs kernel support — a dev shell can't
+            # provide a kernel module.
+            pkgs.bcachefs-tools
+            pkgs.nfs-utils
+            pkgs.samba
+            pkgs.smartmontools
+
             nixGLAlias
             nixVulkanAlias
             nixglPkgs.nixGLIntel
