@@ -33,12 +33,74 @@ pub(super) fn render_app(f: &mut Frame, app: &App) {
         Modal::Form(form) => render_form(f, f.area(), form),
         Modal::Confirm(confirm) => render_confirm(f, f.area(), confirm),
         Modal::Reveal(reveal) => render_reveal(f, f.area(), reveal),
+        Modal::Detail(detail) => render_detail(f, f.area(), detail),
         Modal::None => {
             if app.show_help {
                 render_help_popup(f, f.area());
             }
         }
     }
+}
+
+fn render_detail(f: &mut Frame, area: Rect, detail: &super::app::Detail) {
+    let [outer] = Layout::vertical([Constraint::Percentage(70)])
+        .flex(Flex::Center)
+        .areas(area);
+    let [card] = Layout::horizontal([Constraint::Percentage(70)])
+        .flex(Flex::Center)
+        .areas(outer);
+    f.render_widget(Clear, card);
+
+    let block = theme::panel(&detail.title).border_style(Style::default().fg(theme::ACCENT));
+    let inner = block.inner(card);
+    f.render_widget(block, card);
+
+    let [table_area, hint_area] =
+        Layout::vertical([Constraint::Min(3), Constraint::Length(1)]).areas(inner);
+
+    if detail.rows.is_empty() {
+        f.render_widget(
+            Paragraph::new(Span::styled("(none yet — a to add)", theme::dim()))
+                .alignment(Alignment::Center),
+            table_area,
+        );
+    } else {
+        let header = Row::new(
+            detail
+                .headers
+                .iter()
+                .map(|h| Cell::from(format!(" {h}")))
+                .collect::<Vec<_>>(),
+        )
+        .style(theme::table_header());
+        let rows: Vec<Row> = detail
+            .rows
+            .iter()
+            .map(|r| {
+                Row::new(
+                    r.iter()
+                        .map(|c| Cell::from(format!(" {c}")))
+                        .collect::<Vec<_>>(),
+                )
+            })
+            .collect();
+        let widths = vec![Constraint::Ratio(1, detail.headers.len() as u32); detail.headers.len()];
+        let table = Table::new(rows, widths)
+            .header(header)
+            .row_highlight_style(theme::selected_row())
+            .highlight_symbol(Span::styled("▌", Style::default().fg(theme::ACCENT)));
+        let mut state = TableState::default();
+        state.select(Some(detail.selected));
+        f.render_stateful_widget(table, table_area, &mut state);
+    }
+
+    f.render_widget(
+        Paragraph::new(Span::styled(
+            format!("{} · esc close", detail.hint),
+            theme::dim(),
+        )),
+        hint_area,
+    );
 }
 
 fn render_reveal(f: &mut Frame, area: Rect, reveal: &super::app::Reveal) {
