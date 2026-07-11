@@ -56,6 +56,8 @@ const ID_NVMEOF: i64 = 11;
 const ID_ALERT_RULES: i64 = 12;
 const ID_SETTINGS: i64 = 13;
 const ID_SSH: i64 = 14;
+const ID_TOKENS: i64 = 15;
+const ID_TOKEN_CREATE: i64 = 201;
 const ID_STATS: i64 = 102;
 const ID_ALERTS: i64 = 103;
 const ID_ACTION: i64 = 200;
@@ -187,6 +189,7 @@ enum FormKind {
     },
     CreateAlertRule,
     AddSshKey,
+    CreateToken,
     EditSetting {
         key: &'static str,
     },
@@ -201,10 +204,17 @@ pub(super) struct Confirm {
     params: Value,
 }
 
+/// One-time secret reveal (API tokens): informational, dismissed with any key.
+pub(super) struct Reveal {
+    pub title: String,
+    pub secret: String,
+}
+
 pub(super) enum Modal {
     None,
     Form(Form),
     Confirm(Confirm),
+    Reveal(Reveal),
 }
 
 pub(super) struct App {
@@ -224,6 +234,7 @@ pub(super) struct App {
     pub users: Vec<Value>,
     pub smb_users: Vec<Value>,
     pub smb_groups: Vec<Value>,
+    pub tokens: Vec<Value>,
     pub iscsi: Vec<Value>,
     pub nvmeof: Vec<Value>,
     pub alerts: Vec<Value>,
@@ -262,6 +273,7 @@ impl App {
             users: Vec::new(),
             smb_users: Vec::new(),
             smb_groups: Vec::new(),
+            tokens: Vec::new(),
             iscsi: Vec::new(),
             nvmeof: Vec::new(),
             alerts: Vec::new(),
@@ -298,7 +310,9 @@ impl App {
             TAB_SNAPSHOTS => self.snapshots.len(),
             TAB_SHARES => self.nfs.len() + self.smb.len() + self.iscsi.len() + self.nvmeof.len(),
             TAB_PROTOCOLS => self.protocols.len(),
-            TAB_USERS => self.users.len() + self.smb_users.len() + self.smb_groups.len(),
+            TAB_USERS => {
+                self.users.len() + self.smb_users.len() + self.smb_groups.len() + self.tokens.len()
+            }
             TAB_ALERTS => self.alert_rules.len(),
             TAB_SYSTEM => self.system_rows().len(),
             _ => 0,
@@ -369,14 +383,19 @@ impl App {
 
     /// What the Users-tab selection points at.
     pub(super) fn users_selection(&self) -> UsersSelection {
-        let i = self.selected;
+        let mut i = self.selected;
         if i < self.users.len() {
-            UsersSelection::Account(i)
-        } else if i < self.users.len() + self.smb_users.len() {
-            UsersSelection::SmbUser(i - self.users.len())
-        } else {
-            UsersSelection::Group(i - self.users.len() - self.smb_users.len())
+            return UsersSelection::Account(i);
         }
+        i -= self.users.len();
+        if i < self.smb_users.len() {
+            return UsersSelection::SmbUser(i);
+        }
+        i -= self.smb_users.len();
+        if i < self.smb_groups.len() {
+            return UsersSelection::Group(i);
+        }
+        UsersSelection::Token(i - self.smb_groups.len())
     }
 
     /// What the Shares-tab selection points at.
@@ -416,6 +435,7 @@ pub(super) enum UsersSelection {
     Account(usize),
     SmbUser(usize),
     Group(usize),
+    Token(usize),
 }
 
 pub(super) enum SharesSelection {
@@ -506,6 +526,11 @@ async fn handle_input(app: &mut App, ev: Event, write: &mut WsWrite) {
         }
         Modal::Confirm(_) => {
             handle_confirm_key(app, key.code, write).await;
+            return;
+        }
+        Modal::Reveal(_) => {
+            // Any key dismisses the one-time secret.
+            app.modal = Modal::None;
             return;
         }
         Modal::None => {}
@@ -647,8 +672,15 @@ async fn handle_form_key(app: &mut App, code: KeyCode, write: &mut WsWrite) {
         }
         KeyCode::Enter => match build_request(form) {
             Ok((method, params)) => {
+                // Token creation needs its own id so the raw value can be
+                // caught and revealed once.
+                let id = if method == "auth.token.create" {
+                    ID_TOKEN_CREATE
+                } else {
+                    ID_ACTION
+                };
                 app.status = format!("{method}…");
-                let _ = write.send(client::request(ID_ACTION, method, params)).await;
+                let _ = write.send(client::request(id, method, params)).await;
                 app.modal = Modal::None;
             }
             Err(e) => form.hint = e,
@@ -841,6 +873,36 @@ fn open_create_form(app: &mut App) {
                 focus: 0,
                 kind: FormKind::CreateGroup,
             },
+            UsersSelection::Token(_) => {
+                let mut fs = vec!["(all)".to_string()];
+                fs.extend(app.fs_names());
+                Form {
+                    title: "new API token".into(),
+                    hint: "the token value is shown once — copy it immediately".into(),
+                    fields: vec![
+                        FormField::text("name", ""),
+                        FormField::select(
+                            "role",
+                            vec!["operator".into(), "readonly".into(), "admin".into()],
+                            0,
+                        ),
+                        FormField::select("filesystem", fs, 0),
+                        FormField::select(
+                            "expires",
+                            vec![
+                                "never".into(),
+                                "1 day".into(),
+                                "7 days".into(),
+                                "30 days".into(),
+                                "1 year".into(),
+                            ],
+                            0,
+                        ),
+                    ],
+                    focus: 0,
+                    kind: FormKind::CreateToken,
+                }
+            }
         },
         _ => return,
     };
@@ -949,7 +1011,7 @@ fn open_password_form(app: &mut App) {
                 kind: FormKind::SetSmbPassword { username },
             });
         }
-        UsersSelection::Group(_) => {}
+        UsersSelection::Group(_) | UsersSelection::Token(_) => {}
     }
 }
 
@@ -1134,6 +1196,19 @@ fn open_delete_confirm(app: &mut App) {
                     input: String::new(),
                     method: "smb.group.delete",
                     params: json!({"name": name}),
+                }
+            }
+            UsersSelection::Token(i) => {
+                let Some(t) = app.tokens.get(i) else {
+                    return;
+                };
+                let id = str_of(t, "id");
+                Confirm {
+                    message: format!("revoke API token '{}'?", str_of(t, "name")),
+                    type_to_confirm: None,
+                    input: String::new(),
+                    method: "auth.token.delete",
+                    params: json!({"id": id}),
                 }
             }
         },
@@ -1506,6 +1581,29 @@ fn build_request(form: &mut Form) -> Result<(&'static str, Value), String> {
             require(&get(0), "public key")?;
             Ok(("system.ssh.add_key", json!({"key": get(0)})))
         }
+        FormKind::CreateToken => {
+            require(&get(0), "name")?;
+            let filesystem = match get(2).as_str() {
+                "(all)" | "" => None,
+                fs => Some(fs.to_string()),
+            };
+            let expires: Option<u64> = match get(3).as_str() {
+                "1 day" => Some(86_400),
+                "7 days" => Some(7 * 86_400),
+                "30 days" => Some(30 * 86_400),
+                "1 year" => Some(365 * 86_400),
+                _ => None,
+            };
+            Ok((
+                "auth.token.create",
+                json!({
+                    "name": get(0),
+                    "role": get(1),
+                    "filesystem": filesystem,
+                    "expires_in_secs": expires,
+                }),
+            ))
+        }
         FormKind::EditSetting { key } => {
             require(&get(0), "value")?;
             Ok(("system.settings.update", json!({ *key: get(0) })))
@@ -1571,6 +1669,21 @@ async fn store_response(app: &mut App, id: i64, val: Value, write: &mut WsWrite)
         ID_USERS => app.users = as_array(val),
         ID_SMB_USERS => app.smb_users = as_array(val),
         ID_SMB_GROUPS => app.smb_groups = as_array(val),
+        ID_TOKENS => app.tokens = as_array(val),
+        ID_TOKEN_CREATE => {
+            let raw = val
+                .get("token")
+                .and_then(|v| v.as_str())
+                .unwrap_or_default()
+                .to_string();
+            app.modal = Modal::Reveal(Reveal {
+                title: "API token created — copy it now".into(),
+                secret: raw,
+            });
+            let _ = write
+                .send(client::request(ID_TOKENS, "auth.token.list", Value::Null))
+                .await;
+        }
         ID_ISCSI => app.iscsi = as_array(val),
         ID_NVMEOF => app.nvmeof = as_array(val),
         ID_ALERT_RULES => app.alert_rules = as_array(val),
@@ -1690,9 +1803,12 @@ async fn refresh_all(app: &mut App, write: &mut WsWrite) {
     }
     // Admin-only; other roles just get a permission error we ignore.
     if app.role == "admin" {
-        let _ = write
-            .send(client::request(ID_USERS, "auth.list_users", Value::Null))
-            .await;
+        for (id, method) in [
+            (ID_USERS, "auth.list_users"),
+            (ID_TOKENS, "auth.token.list"),
+        ] {
+            let _ = write.send(client::request(id, method, Value::Null)).await;
+        }
     }
 }
 

@@ -32,12 +32,51 @@ pub(super) fn render_app(f: &mut Frame, app: &App) {
     match &app.modal {
         Modal::Form(form) => render_form(f, f.area(), form),
         Modal::Confirm(confirm) => render_confirm(f, f.area(), confirm),
+        Modal::Reveal(reveal) => render_reveal(f, f.area(), reveal),
         Modal::None => {
             if app.show_help {
                 render_help_popup(f, f.area());
             }
         }
     }
+}
+
+fn render_reveal(f: &mut Frame, area: Rect, reveal: &super::app::Reveal) {
+    let [outer] = Layout::vertical([Constraint::Length(8)])
+        .flex(Flex::Center)
+        .areas(area);
+    let [card] = Layout::horizontal([Constraint::Length(76)])
+        .flex(Flex::Center)
+        .areas(outer);
+    f.render_widget(Clear, card);
+    let block = theme::panel(&reveal.title).border_style(Style::default().fg(theme::GREEN));
+    let inner = block.inner(card);
+    f.render_widget(block, card);
+    let rows = Layout::vertical([
+        Constraint::Length(1),
+        Constraint::Length(1),
+        Constraint::Length(1),
+        Constraint::Min(0),
+    ])
+    .split(inner);
+    f.render_widget(
+        Paragraph::new(Span::styled(
+            reveal.secret.clone(),
+            Style::default()
+                .fg(theme::YELLOW)
+                .add_modifier(Modifier::BOLD),
+        ))
+        .alignment(Alignment::Center),
+        rows[1],
+    );
+    f.render_widget(
+        Paragraph::new(Span::styled(
+            "this is the only time it is shown — press any key to dismiss",
+            theme::dim(),
+        ))
+        .alignment(Alignment::Center),
+        rows[3],
+    );
 }
 
 // ── header ──────────────────────────────────────────────────────
@@ -855,19 +894,44 @@ fn render_users(f: &mut Frame, area: Rect, app: &App) {
             .height(2),
         );
     }
+    for t in &app.tokens {
+        let scope = t
+            .get("filesystem")
+            .and_then(|v| v.as_str())
+            .map(|f| format!("fs:{f}"))
+            .unwrap_or_else(|| "all".into());
+        let exp = t
+            .get("expires_at")
+            .and_then(|v| v.as_u64())
+            .map(|_| "expires")
+            .unwrap_or("never expires");
+        rows.push(
+            Row::new(vec![
+                cell2(primary(field(t, "name")), secondary(exp.into())),
+                cell1(Span::styled("token", theme::dim())),
+                cell1(Span::styled(
+                    format!("{} · {scope}", field(t, "role")),
+                    Style::default().fg(theme::SUBTEXT),
+                )),
+            ])
+            .height(2),
+        );
+    }
     let hint = match app.users_selection() {
         UsersSelection::Account(_) => "n new · d delete · p password",
         UsersSelection::SmbUser(_) => "n new · d delete · p password · g/G groups",
         UsersSelection::Group(_) => "n new · d delete",
+        UsersSelection::Token(_) => "n new · d revoke",
     };
     render_table(
         f,
         area,
         &format!(
-            "users ({} accounts · {} smb · {} groups) — {hint}",
+            "users ({} accounts · {} smb · {} groups · {} tokens) — {hint}",
             app.users.len(),
             app.smb_users.len(),
-            app.smb_groups.len()
+            app.smb_groups.len(),
+            app.tokens.len()
         ),
         &["name", "kind", "detail"],
         &[
