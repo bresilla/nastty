@@ -1,7 +1,7 @@
-//! Metrics collection owned by `nasttyd`.
+//! Metrics collection owned by `nastty serve`.
 //!
 //! The upstream project runs these collectors in a second daemon. Nastty keeps
-//! them in-process so operators only need `nasttyd` and the TUI.
+//! them in-process so operators only need the single `nastty` executable.
 
 use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::fmt::Write as _;
@@ -29,7 +29,7 @@ struct History {
     series: HashMap<(String, String), VecDeque<Sample>>,
 }
 
-/// Live metrics and bounded in-memory history collected by `nasttyd`.
+/// Live metrics and bounded in-memory history collected by `nastty serve`.
 pub struct MetricsService {
     stats: RwLock<SystemStats>,
     disks: RwLock<Vec<DiskHealth>>,
@@ -47,7 +47,7 @@ impl MetricsService {
         })
     }
 
-    /// Start the built-in sampler. This task lives for the lifetime of nasttyd.
+    /// Start the built-in sampler. This task lives for the server lifetime.
     pub fn start(self: &Arc<Self>) {
         let service = self.clone();
         tokio::spawn(async move {

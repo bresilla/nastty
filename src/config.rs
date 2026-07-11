@@ -1,4 +1,4 @@
-//! CLI configuration for nasttyd. State paths (`/var/lib/nasty`, `/fs`)
+//! Configuration for `nastty serve`. State paths (`/var/lib/nasty`, `/fs`)
 //! are compile-time constants inside the upstream nasty crates and are
 //! deliberately not configurable here.
 
@@ -14,33 +14,11 @@ pub struct Config {
     pub allow_missing_deps: bool,
 }
 
-pub enum CliAction {
-    Run(Config),
-    Exit,
-}
-
-/// Hand-rolled arg parsing, same style as the upstream engine.
-pub fn parse_args(args: &[String]) -> Result<CliAction, String> {
-    if args.iter().any(|a| a == "--version" || a == "-V") {
-        println!("nasttyd {}", env!("CARGO_PKG_VERSION"));
-        return Ok(CliAction::Exit);
-    }
-    if args.iter().any(|a| a == "--help" || a == "-h") {
-        println!(
-            "nasttyd — thin local NAS API server built on the nasty crates\n\n\
-             USAGE: nasttyd [--listen ADDR] [--allow-missing-deps]\n\n\
-             OPTIONS:\n\
-             \x20 --listen ADDR         listen address (default {DEFAULT_LISTEN})\n\
-             \x20 --allow-missing-deps  start even without bcachefs (development only)\n\
-             \x20 -V, --version         print version\n\
-             \x20 -h, --help            show this help"
-        );
-        return Ok(CliAction::Exit);
-    }
-
+/// Parse arguments that follow the `serve` subcommand.
+pub fn parse_serve_args(args: &[String]) -> Result<Config, String> {
     let mut listen: SocketAddr = DEFAULT_LISTEN.parse().expect("default listen must parse");
     let mut allow_missing_deps = false;
-    let mut iter = args.iter().skip(1);
+    let mut iter = args.iter();
     while let Some(arg) = iter.next() {
         match arg.as_str() {
             "--listen" => {
@@ -56,10 +34,10 @@ pub fn parse_args(args: &[String]) -> Result<CliAction, String> {
         }
     }
 
-    Ok(CliAction::Run(Config {
+    Ok(Config {
         listen,
         allow_missing_deps,
-    }))
+    })
 }
 
 #[cfg(test)]
@@ -72,22 +50,18 @@ mod tests {
 
     #[test]
     fn default_listen_parses() {
-        match parse_args(&strings(&["nasttyd"])).unwrap() {
-            CliAction::Run(c) => assert_eq!(c.listen.to_string(), DEFAULT_LISTEN),
-            CliAction::Exit => panic!("expected run"),
-        }
+        let config = parse_serve_args(&[]).unwrap();
+        assert_eq!(config.listen.to_string(), DEFAULT_LISTEN);
     }
 
     #[test]
     fn listen_override() {
-        match parse_args(&strings(&["nasttyd", "--listen", "127.0.0.1:9999"])).unwrap() {
-            CliAction::Run(c) => assert_eq!(c.listen.port(), 9999),
-            CliAction::Exit => panic!("expected run"),
-        }
+        let config = parse_serve_args(&strings(&["--listen", "127.0.0.1:9999"])).unwrap();
+        assert_eq!(config.listen.port(), 9999);
     }
 
     #[test]
     fn unknown_arg_errors() {
-        assert!(parse_args(&strings(&["nasttyd", "--bogus"])).is_err());
+        assert!(parse_serve_args(&strings(&["--bogus"])).is_err());
     }
 }

@@ -2,17 +2,13 @@
 name = "nastty"
 version = "0.1.0"
 edition = "2024"
-description = "Thin local NAS API server built on the upstream nasty crates"
+description = "Single-binary NAS server and terminal UI built on the upstream nasty crates"
 license = "MIT"
 readme = "README.md"
 publish = false
 
 [lib]
 path = "src/lib.rs"
-
-[[bin]]
-name = "nasttyd"
-path = "src/bin/nasttyd.rs"
 
 [[bin]]
 name = "nastty"

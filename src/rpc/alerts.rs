@@ -58,7 +58,7 @@ pub(super) async fn try_route(
     })
 }
 
-/// Evaluate configured alert rules against metrics collected by nasttyd.
+/// Evaluate configured alert rules against metrics collected by `nastty serve`.
 async fn evaluate_active_alerts(state: &AppState) -> Vec<alerts::ActiveAlert> {
     let stats = state.metrics.stats().await;
 

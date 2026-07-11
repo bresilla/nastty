@@ -18,7 +18,7 @@ pub(super) async fn try_route(
         "system.health" => ok(req, state.system.health().await),
         "system.hardware.summary" => ok(req, nasty_system::hardware::system_summary().await),
 
-        // ── live metrics (collected inside nasttyd) ─────────────
+        // ── live metrics (collected inside `nastty serve`) ──────
         "system.stats" => ok(req, state.metrics.stats().await),
         "system.disks" => {
             if state
@@ -48,7 +48,7 @@ pub(super) async fn try_route(
 
         // ── journal logs ────────────────────────────────────────
         "system.logs" => {
-            let unit = str_param(req, "unit").unwrap_or("nasttyd");
+            let unit = str_param(req, "unit").unwrap_or("nastty");
             let lines = req
                 .params
                 .as_ref()
@@ -78,7 +78,7 @@ pub(super) async fn try_route(
         }
         "system.logs.units" => {
             let units = [
-                "nasttyd",
+                "nastty",
                 "nfs-server",
                 "smbd",
                 "nmbd",

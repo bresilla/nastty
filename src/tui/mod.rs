@@ -1,4 +1,4 @@
-//! Terminal UI client for nasttyd. Logs in, opens the JSON-RPC
+//! Terminal UI for `nastty serve`. Logs in, opens the JSON-RPC
 //! WebSocket, renders live NAS state, and refreshes on server events.
 
 mod app;

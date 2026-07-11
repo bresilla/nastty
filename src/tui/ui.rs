@@ -864,7 +864,7 @@ fn render_meters(f: &mut Frame, area: Rect, app: &App) {
             .areas(inner);
         f.render_widget(
             Paragraph::new(Span::styled(
-                "metrics are starting — nasttyd collects them automatically",
+                "metrics are starting — nastty serve collects them automatically",
                 theme::dim(),
             ))
             .alignment(Alignment::Center),

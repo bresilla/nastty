@@ -10,6 +10,7 @@ pub mod config;
 pub mod metrics;
 pub mod rest;
 pub mod rpc;
+pub mod serve;
 pub mod server;
 pub mod state;
 pub mod tui;

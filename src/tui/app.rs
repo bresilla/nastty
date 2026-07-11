@@ -1278,7 +1278,7 @@ pub(super) fn open_protocol_menu(app: &mut App) {
         ),
         menu_item(
             "Open full inspector",
-            "show every service field reported by nasttyd",
+            "show every service field reported by nastty serve",
             ContextAction::OpenInspector,
         ),
         menu_item(
@@ -2538,14 +2538,14 @@ async fn handle_fs_status_key(app: &mut App, code: KeyCode, write: &mut WsWrite)
 async fn open_logs(app: &mut App, write: &mut WsWrite) {
     app.logs = Some("loading logs…".to_string());
     app.modal = Modal::Logs(Logs {
-        unit: "nasttyd".to_string(),
+        unit: "nastty".to_string(),
         scroll: 0,
     });
     let _ = write
         .send(client::request(
             ID_LOGS,
             "system.logs",
-            json!({"unit": "nasttyd", "lines": 500}),
+            json!({"unit": "nastty", "lines": 500}),
         ))
         .await;
 }

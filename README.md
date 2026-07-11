@@ -1,15 +1,20 @@
 # nastty
 
 A local **bcachefs** NAS built on the
-[nasty](https://github.com/nasty-project/nasty) crates: a small API server
-(`nasttyd`) and a terminal UI (`nastty`).
+[nasty](https://github.com/nasty-project/nasty) crates. It builds one
+executable, `nastty`, with `serve` and `tui` subcommands.
+
+```sh
+nastty serve    # NAS API, persistence, protocols, and built-in metrics
+nastty tui      # interactive terminal client
+```
 
 The heavy lifting — bcachefs filesystems, subvolumes, snapshots,
 NFS/SMB/iSCSI/NVMe-oF sharing, protocol lifecycle — comes from the upstream
 `nasty-*` library crates, consumed directly as pinned git dependencies (no
-fork). This repo owns two thin pieces:
+fork). This repo owns one executable with two modes:
 
-- **`nasttyd`** — the server shell:
+- **`nastty serve`** — the server mode:
   - username/password sessions (cookie + bearer token)
   - JSON-RPC 2.0 over WebSocket at `/ws`, with change events pushed to clients
   - REST gateway: `/api/v1/<domain>/<method>` → `<domain>.<method>`
@@ -17,7 +22,7 @@ fork). This repo owns two thin pieces:
     Prometheus output at `/metrics` and in-process history
   - upstream-compatible method names (`fs.list`, `device.list`,
     `share.nfs.create`, `service.protocol.enable`, ...)
-- **`nastty`** — a [ratatui](https://ratatui.rs) terminal client that logs in,
+- **`nastty tui`** — a [ratatui](https://ratatui.rs) terminal client that logs in,
   speaks the same JSON-RPC over the WebSocket, shows live NAS state in tabs, and
   refreshes automatically on server events.
 
@@ -31,10 +36,10 @@ management.
 # file sharing daemons (NFS + SMB)
 sudo apt install -y nfs-kernel-server samba
 
-# only needed before running nasttyd as an unprivileged user; a root-run
-# nasttyd creates these automatically
+# only needed before running `nastty serve` as an unprivileged user;
+# a root-run server creates these automatically
 sudo mkdir -p /var/lib/nasty /fs
-sudo chown $USER /var/lib/nasty        # only if running nasttyd unprivileged
+sudo chown $USER /var/lib/nasty        # only for an unprivileged server
 ```
 
 Optional: `wsdd` (Windows discovery), `smartmontools` (disk health).
@@ -51,9 +56,9 @@ smbpasswd) need root; read-only calls degrade gracefully without it.
 ## Run
 
 ```sh
-make serve                 # cargo run --bin nasttyd
+make serve                 # cargo run --bin nastty -- serve
 # or
-nasttyd --listen 127.0.0.1:2137
+nastty serve --listen 127.0.0.1:2137
 ```
 
 **bcachefs-tools is required**: the server refuses to start without it and
@@ -108,18 +113,18 @@ connected socket, so clients refresh only the affected collection:
 Collections: `filesystem`, `subvolume`, `snapshot`, `share.nfs`,
 `share.smb`, `share.iscsi`, `share.nvmeof`, `protocol`.
 
-Metrics are collected inside `nasttyd`; there is no additional metrics daemon
-to install or run. The TUI's live dashboard and the `/metrics` endpoint use the
-same in-process sampler.
+Metrics are collected inside `nastty serve`; there is no additional metrics
+daemon to install or run. The TUI's live dashboard and the `/metrics` endpoint
+use the same in-process sampler.
 
 ## Terminal UI
 
-With `nasttyd` running, start the TUI:
+With `nastty serve` running, start the TUI:
 
 ```sh
-make tui                   # cargo run --bin nastty
+make tui                   # cargo run --bin nastty -- tui
 # or
-nastty --server http://127.0.0.1:2137 --user admin
+nastty tui --server http://127.0.0.1:2137 --user admin
 ```
 
 It shows a login screen (and a forced password-change screen on first run),
@@ -136,7 +141,8 @@ rows, and `Space` opens their details in an on-demand inspector drawer:
 - **Snapshots** — create, clone, and remove snapshots
 - **Shares** — NFS and SMB shares
 - **Files** — browse and manage the mounted filesystem tree
-- **Protocols** — enable/disable NFS/SMB/iSCSI/NVMe-oF/SSH/mDNS/... with Enter
+- **Protocols** — inspect installation/runtime status and manage
+  NFS/SMB/iSCSI/NVMe-oF/SSH/mDNS/... through the Enter control center
 - **Users** — accounts, SMB identities, groups, and API tokens
 - **Alerts** — active alerts and configurable alert rules
 - **System** — host settings, SSH keys, and system logs
@@ -181,9 +187,50 @@ The `nasty-*` dependencies are pinned to one upstream commit in
 ## Development
 
 ```sh
-make build      # build the library
+make build      # build the single nastty executable
 make test       # run tests
 make verify     # fmt-check + check + tests + clippy + rustdoc
-make serve      # run the daemon (nasttyd)
-make tui        # run the terminal UI (nastty)
+make serve      # run nastty serve
+make tui        # run nastty tui
+```
+
+## Release binaries
+
+Publishing a GitHub Release triggers
+`.github/workflows/release.yml`. It builds the single `nastty` executable on
+native Linux amd64 and arm64 runners, smoke-tests both subcommands, and attaches
+a raw executable, `.tar.gz` archive, and SHA-256 checksum manifest for each
+architecture:
+
+```text
+nastty-linux-amd64
+nastty-linux-amd64.tar.gz
+nastty-linux-amd64.sha256
+nastty-linux-arm64
+nastty-linux-arm64.tar.gz
+nastty-linux-arm64.sha256
+```
+
+Linux is the release platform because the server controls Linux facilities such
+as bcachefs, systemd, configfs, NFS, Samba, SMART, and `/proc` metrics.
+
+### Install a released binary
+
+Download the three files for your architecture from the GitHub Release. For
+amd64:
+
+```sh
+sha256sum -c nastty-linux-amd64.sha256
+tar -xzf nastty-linux-amd64.tar.gz
+sudo install -m 0755 nastty-linux-amd64 /usr/local/bin/nastty
+nastty --version
+```
+
+For a 64-bit ARM NAS, replace `amd64` with `arm64`.
+
+The installed file provides both modes—there is no second daemon executable:
+
+```sh
+sudo nastty serve
+nastty tui
 ```

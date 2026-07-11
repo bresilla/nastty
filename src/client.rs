@@ -1,4 +1,4 @@
-//! Client for talking to nasttyd: HTTP login plus a JSON-RPC 2.0
+//! Client for talking to `nastty serve`: HTTP login plus a JSON-RPC 2.0
 //! WebSocket. Shared by the `nastty` TUI and available to any other
 //! client (scripts, a future GUI).
 
@@ -245,7 +245,7 @@ mod tests {
         assert_eq!(v["method"], "fs.list");
     }
 
-    /// Live end-to-end smoke against a running `nasttyd` on the default
+    /// Live end-to-end smoke against a running `nastty serve` on the default
     /// port. Ignored by default (needs the server + a fresh admin/admin);
     /// run with `cargo test --lib -- --ignored live_smoke`.
     #[tokio::test]

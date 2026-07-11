@@ -18,7 +18,7 @@ pub(super) async fn try_route(
         "service.protocol.enable" => match require_str(req, "name") {
             Ok("rest-server") => err(
                 req,
-                "rest-server is not part of nastty; nasttyd already owns the API in the two-binary design",
+                "rest-server is not part of nastty; `nastty serve` already owns the API",
             ),
             Ok(name) => match ensure_protocol_state_dir().await {
                 Ok(()) => match state.protocols.enable(name).await {
@@ -32,7 +32,7 @@ pub(super) async fn try_route(
         "service.protocol.disable" => match require_str(req, "name") {
             Ok("rest-server") => err(
                 req,
-                "rest-server is not part of nastty; nasttyd already owns the API in the two-binary design",
+                "rest-server is not part of nastty; `nastty serve` already owns the API",
             ),
             Ok(name) => match ensure_protocol_state_dir().await {
                 Ok(()) => match state.protocols.disable(name).await {
@@ -77,7 +77,7 @@ async fn ensure_protocol_state_dir() -> Result<(), String> {
         .await
         .map_err(|error| {
             format!(
-                "cannot persist protocol state in /var/lib/nasty: {error}. Start nasttyd as root, or run: sudo install -d -m 0755 -o \"$(id -un)\" /var/lib/nasty"
+                "cannot persist protocol state in /var/lib/nasty: {error}. Start `nastty serve` as root, or run: sudo install -d -m 0755 -o \"$(id -un)\" /var/lib/nasty"
             )
         })
 }

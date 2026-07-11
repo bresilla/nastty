@@ -1,37 +1,70 @@
-name: release
+name: release binaries
 
 on:
   release:
-    types: [created]
+    types: [published]
 
 permissions:
   contents: write
 
 jobs:
-  release:
-    name: release ${{ matrix.artifact }}
+  binaries:
+    name: ${{ matrix.artifact }}
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
     strategy:
       fail-fast: false
       matrix:
         include:
-          - os: ubuntu-latest
+          - os: ubuntu-24.04
             artifact: "nastty-linux-amd64"
           - os: ubuntu-24.04-arm
             artifact: "nastty-linux-arm64"
-          - os: macos-15-intel
-            artifact: "nastty-macos-amd64"
-          - os: macos-14
-            artifact: "nastty-macos-arm64"
     steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-      - name: Build
-        run: cargo build --release --example main
-      - name: Package
-        run: tar -czf "${{ matrix.artifact }}.tar.gz" "target/release/examples/main"
-      - name: Upload artifact
-        uses: softprops/action-gh-release@v2
+      - name: Checkout release tag
+        uses: actions/checkout@v6
         with:
-          files: ${{ matrix.artifact }}.tar.gz
+          ref: ${{ github.event.release.tag_name }}
 
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Cargo files
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: release-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('Cargo.lock') }}
+          restore-keys: |
+            release-${{ runner.os }}-${{ runner.arch }}-
+
+      - name: Build
+        run: make build-release
+
+      - name: Smoke test
+        run: |
+          target/release/nastty --version
+          target/release/nastty serve --help
+          target/release/nastty tui --help
+
+      - name: Package
+        env:
+          ARTIFACT: ${{ matrix.artifact }}
+        run: |
+          mkdir -p dist
+          install -m 0755 target/release/nastty "dist/${ARTIFACT}"
+          tar -C dist -czf "dist/${ARTIFACT}.tar.gz" "${ARTIFACT}"
+          (
+            cd dist
+            sha256sum "${ARTIFACT}" "${ARTIFACT}.tar.gz" > "${ARTIFACT}.sha256"
+          )
+
+      - name: Upload release assets
+        uses: softprops/action-gh-release@v3
+        with:
+          tag_name: ${{ github.event.release.tag_name }}
+          files: |
+            dist/${{ matrix.artifact }}
+            dist/${{ matrix.artifact }}.tar.gz
+            dist/${{ matrix.artifact }}.sha256

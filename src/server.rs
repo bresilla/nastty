@@ -47,14 +47,15 @@ pub async fn serve(
 ) -> Result<(), std::io::Error> {
     let app = build_router(state);
     let listener = tokio::net::TcpListener::bind(listen).await?;
-    info!("nasttyd listening on http://{listen}");
+    info!("nastty serve listening on http://{listen}");
     axum::serve(listener, app).await
 }
 
 async fn health_handler() -> impl IntoResponse {
     Json(serde_json::json!({
         "status": "ok",
-        "service": "nasttyd",
+        "service": "nastty",
+        "mode": "serve",
         "version": env!("CARGO_PKG_VERSION"),
     }))
 }
