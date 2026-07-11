@@ -34,12 +34,44 @@ pub(super) fn render_app(f: &mut Frame, app: &App) {
         Modal::Confirm(confirm) => render_confirm(f, f.area(), confirm),
         Modal::Reveal(reveal) => render_reveal(f, f.area(), reveal),
         Modal::Detail(detail) => render_detail(f, f.area(), detail),
+        Modal::Logs(logs) => render_logs(f, f.area(), logs, app),
         Modal::None => {
             if app.show_help {
                 render_help_popup(f, f.area());
             }
         }
     }
+}
+
+fn render_logs(f: &mut Frame, area: Rect, logs: &super::app::Logs, app: &App) {
+    let [outer] = Layout::vertical([Constraint::Percentage(85)])
+        .flex(Flex::Center)
+        .areas(area);
+    let [card] = Layout::horizontal([Constraint::Percentage(88)])
+        .flex(Flex::Center)
+        .areas(outer);
+    f.render_widget(Clear, card);
+
+    let title = format!("logs · {} — j/k scroll · r refresh · esc close", logs.unit);
+    let block = theme::panel(&title).border_style(Style::default().fg(theme::ACCENT));
+    let text = app.logs.clone().unwrap_or_default();
+    let lines: Vec<Line> = text
+        .lines()
+        .map(|l| {
+            let color = if l.contains("ERROR") || l.contains("error") {
+                theme::RED
+            } else if l.contains("WARN") || l.contains("warn") {
+                theme::YELLOW
+            } else {
+                theme::SUBTEXT
+            };
+            Line::from(Span::styled(l.to_string(), Style::default().fg(color)))
+        })
+        .collect();
+    f.render_widget(
+        Paragraph::new(lines).block(block).scroll((logs.scroll, 0)),
+        card,
+    );
 }
 
 fn render_detail(f: &mut Frame, area: Rect, detail: &super::app::Detail) {
@@ -1124,7 +1156,7 @@ fn render_system(f: &mut Frame, area: Rect, app: &App) {
     render_table(
         f,
         area,
-        "system — ↵/e edit · n add ssh key · d remove key",
+        "system — ↵/e edit · n add ssh key · d remove key · L logs",
         &["item", "value"],
         &[Constraint::Min(28), Constraint::Min(24)],
         rows,

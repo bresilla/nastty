@@ -258,12 +258,19 @@ enum DetailCtx {
     NvmeofNamespaces { id: String, values: Vec<Value> },
 }
 
+/// Scrollable journal-log viewer.
+pub(super) struct Logs {
+    pub unit: String,
+    pub scroll: u16,
+}
+
 pub(super) enum Modal {
     None,
     Form(Form),
     Confirm(Confirm),
     Reveal(Reveal),
     Detail(Detail),
+    Logs(Logs),
 }
 
 pub(super) struct App {
@@ -654,6 +661,10 @@ async fn handle_input(app: &mut App, ev: Event, write: &mut WsWrite) {
             handle_detail_key(app, key.code, write).await;
             return;
         }
+        Modal::Logs(_) => {
+            handle_logs_key(app, key.code, write).await;
+            return;
+        }
         Modal::None => {}
     }
 
@@ -728,6 +739,7 @@ async fn handle_input(app: &mut App, ev: Event, write: &mut WsWrite) {
         KeyCode::Char('e') if app.tab == TAB_SHARES => toggle_share_enabled(app, write).await,
         KeyCode::Char('e') if app.tab == TAB_ALERTS => toggle_alert_rule(app, write).await,
         KeyCode::Char('e') if app.tab == TAB_SYSTEM => edit_system_row(app, write).await,
+        KeyCode::Char('L') if app.tab == TAB_SYSTEM => open_logs(app, write).await,
         KeyCode::Char('c') if app.tab == TAB_SNAPSHOTS => open_clone_snapshot_form(app),
         KeyCode::Char('w') if app.tab == TAB_DEVICES => open_wipe_confirm(app),
         KeyCode::Char('p') if app.tab == TAB_USERS => open_password_form(app),
@@ -1390,6 +1402,45 @@ async fn toggle_alert_rule(app: &mut App, write: &mut WsWrite) {
             json!({"id": id, "enabled": !enabled}),
         ))
         .await;
+}
+
+async fn open_logs(app: &mut App, write: &mut WsWrite) {
+    app.logs = Some("loading logs…".to_string());
+    app.modal = Modal::Logs(Logs {
+        unit: "nasttyd".to_string(),
+        scroll: 0,
+    });
+    let _ = write
+        .send(client::request(
+            ID_LOGS,
+            "system.logs",
+            json!({"unit": "nasttyd", "lines": 500}),
+        ))
+        .await;
+}
+
+async fn handle_logs_key(app: &mut App, code: KeyCode, write: &mut WsWrite) {
+    let Modal::Logs(logs) = &mut app.modal else {
+        return;
+    };
+    match code {
+        KeyCode::Esc | KeyCode::Char('q') => app.modal = Modal::None,
+        KeyCode::Down | KeyCode::Char('j') => logs.scroll = logs.scroll.saturating_add(1),
+        KeyCode::Up | KeyCode::Char('k') => logs.scroll = logs.scroll.saturating_sub(1),
+        KeyCode::PageDown | KeyCode::Char(' ') => logs.scroll = logs.scroll.saturating_add(20),
+        KeyCode::PageUp => logs.scroll = logs.scroll.saturating_sub(20),
+        KeyCode::Char('r') => {
+            let unit = logs.unit.clone();
+            let _ = write
+                .send(client::request(
+                    ID_LOGS,
+                    "system.logs",
+                    json!({"unit": unit, "lines": 500}),
+                ))
+                .await;
+        }
+        _ => {}
+    }
 }
 
 async fn edit_system_row(app: &mut App, write: &mut WsWrite) {
