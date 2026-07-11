@@ -66,6 +66,8 @@ const ID_FILES: i64 = 19;
 const ID_FIREWALL: i64 = 20;
 const ID_NOTIFICATIONS: i64 = 21;
 const ID_DISKS: i64 = 22;
+const ID_FS_USAGE: i64 = 23;
+const ID_FS_SCRUB: i64 = 24;
 const ID_TOKEN_CREATE: i64 = 201;
 const ID_STATS: i64 = 102;
 const ID_ALERTS: i64 = 103;
@@ -312,6 +314,11 @@ pub(super) struct Logs {
     pub scroll: u16,
 }
 
+/// Live status panel for one filesystem (usage + scrub + fsck).
+pub(super) struct FsStatus {
+    pub name: String,
+}
+
 pub(super) enum Modal {
     None,
     Form(Form),
@@ -319,6 +326,7 @@ pub(super) enum Modal {
     Reveal(Reveal),
     Detail(Detail),
     Logs(Logs),
+    FsStatus(FsStatus),
 }
 
 pub(super) struct App {
@@ -360,6 +368,9 @@ pub(super) struct App {
     pub files: Vec<Value>,
     /// SMART health per disk (from system.disks), keyed by device name.
     pub disks: Vec<Value>,
+    /// Live usage/scrub for the filesystem shown in the FsStatus modal.
+    pub fs_usage: Option<Value>,
+    pub fs_scrub: Option<Value>,
     pub status: String,
     pub show_help: bool,
     pub modal: Modal,
@@ -405,6 +416,8 @@ impl App {
             cwd: "/fs".to_string(),
             files: Vec::new(),
             disks: Vec::new(),
+            fs_usage: None,
+            fs_scrub: None,
             status: "loading…".to_string(),
             show_help: false,
             modal: Modal::None,
@@ -784,6 +797,10 @@ async fn handle_input(app: &mut App, ev: Event, write: &mut WsWrite) {
             handle_logs_key(app, key.code, write).await;
             return;
         }
+        Modal::FsStatus(_) => {
+            handle_fs_status_key(app, key.code, write).await;
+            return;
+        }
         Modal::None => {}
     }
 
@@ -859,6 +876,7 @@ async fn handle_input(app: &mut App, ev: Event, write: &mut WsWrite) {
         KeyCode::Char('d') => open_delete_confirm(app),
         KeyCode::Char('D') if app.tab == TAB_FILESYSTEMS => open_destroy_confirm(app),
         KeyCode::Char('m') if app.tab == TAB_FILESYSTEMS => mount_toggle(app, write).await,
+        KeyCode::Char('i') if app.tab == TAB_FILESYSTEMS => open_fs_status(app, write).await,
         KeyCode::Char('s') => match app.tab {
             TAB_FILESYSTEMS => scrub_start(app, write).await,
             TAB_SUBVOLUMES => open_snapshot_form_for_selected(app),
@@ -1641,6 +1659,69 @@ async fn toggle_alert_rule(app: &mut App, write: &mut WsWrite) {
             json!({"id": id, "enabled": !enabled}),
         ))
         .await;
+}
+
+async fn open_fs_status(app: &mut App, write: &mut WsWrite) {
+    let Some(fs) = app.filesystems.get(app.selected) else {
+        return;
+    };
+    let name = str_of(fs, "name");
+    app.fs_usage = None;
+    app.fs_scrub = None;
+    app.modal = Modal::FsStatus(FsStatus { name: name.clone() });
+    for (id, method) in [(ID_FS_USAGE, "fs.usage"), (ID_FS_SCRUB, "fs.scrub.status")] {
+        let _ = write
+            .send(client::request(id, method, json!({"name": name})))
+            .await;
+    }
+}
+
+async fn handle_fs_status_key(app: &mut App, code: KeyCode, write: &mut WsWrite) {
+    let Modal::FsStatus(fss) = &app.modal else {
+        return;
+    };
+    let name = fss.name.clone();
+    match code {
+        KeyCode::Esc | KeyCode::Char('q') => app.modal = Modal::None,
+        KeyCode::Char('s') => {
+            app.status = format!("scrub {name}…");
+            let _ = write
+                .send(client::request(
+                    ID_ACTION,
+                    "fs.scrub.start",
+                    json!({"name": name}),
+                ))
+                .await;
+        }
+        KeyCode::Char('c') => {
+            app.status = format!("cancel scrub {name}…");
+            let _ = write
+                .send(client::request(
+                    ID_ACTION,
+                    "fs.scrub.cancel",
+                    json!({"name": name}),
+                ))
+                .await;
+        }
+        KeyCode::Char('f') => {
+            app.status = format!("fsck {name}…");
+            let _ = write
+                .send(client::request(
+                    ID_ACTION,
+                    "fs.fsck.start",
+                    json!({"name": name, "repair": false}),
+                ))
+                .await;
+        }
+        KeyCode::Char('r') => {
+            for (id, method) in [(ID_FS_USAGE, "fs.usage"), (ID_FS_SCRUB, "fs.scrub.status")] {
+                let _ = write
+                    .send(client::request(id, method, json!({"name": name})))
+                    .await;
+            }
+        }
+        _ => {}
+    }
 }
 
 async fn open_logs(app: &mut App, write: &mut WsWrite) {
@@ -2853,6 +2934,8 @@ async fn store_response(app: &mut App, id: i64, val: Value, write: &mut WsWrite)
         ID_FIREWALL => app.firewall = Some(val),
         ID_NOTIFICATIONS => app.notifications = Some(val),
         ID_DISKS => app.disks = as_array(val),
+        ID_FS_USAGE => app.fs_usage = Some(val),
+        ID_FS_SCRUB => app.fs_scrub = Some(val),
         ID_LOGS => app.logs = Some(val.as_str().unwrap_or_default().to_string()),
         ID_FILES => app.files = as_array(val),
         ID_SSH => app.ssh = Some(val),

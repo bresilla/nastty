@@ -36,12 +36,99 @@ pub(super) fn render_app(f: &mut Frame, app: &App) {
         Modal::Reveal(reveal) => render_reveal(f, f.area(), reveal),
         Modal::Detail(detail) => render_detail(f, f.area(), detail),
         Modal::Logs(logs) => render_logs(f, f.area(), logs, app),
+        Modal::FsStatus(fss) => render_fs_status(f, f.area(), fss, app),
         Modal::None => {
             if app.show_help {
                 render_help_popup(f, f.area());
             }
         }
     }
+}
+
+fn render_fs_status(f: &mut Frame, area: Rect, fss: &super::app::FsStatus, app: &App) {
+    let [outer] = Layout::vertical([Constraint::Length(16)])
+        .flex(Flex::Center)
+        .areas(area);
+    let [card] = Layout::horizontal([Constraint::Length(72)])
+        .flex(Flex::Center)
+        .areas(outer);
+    f.render_widget(Clear, card);
+    let title = format!(
+        "{} — s scrub · c cancel · f fsck · r refresh · esc close",
+        fss.name
+    );
+    let block = theme::panel(&title).border_style(Style::default().fg(theme::ACCENT));
+    let inner = block.inner(card);
+    f.render_widget(block, card);
+
+    let [usage_area, gap, scrub_area] = Layout::vertical([
+        Constraint::Length(6),
+        Constraint::Length(1),
+        Constraint::Min(4),
+    ])
+    .areas(inner);
+
+    // Usage: totals + a bar.
+    let u = app.fs_usage.clone().unwrap_or(Value::Null);
+    let total = u.get("total_bytes").and_then(|v| v.as_u64()).unwrap_or(0);
+    let used = u.get("used_bytes").and_then(|v| v.as_u64()).unwrap_or(0);
+    let avail = u
+        .get("available_bytes")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(0);
+    let pct = if total > 0 {
+        (used as f64 / total as f64 * 100.0).clamp(0.0, 100.0)
+    } else {
+        0.0
+    };
+    let [u_lines, u_bar] =
+        Layout::vertical([Constraint::Length(4), Constraint::Length(1)]).areas(usage_area);
+    f.render_widget(
+        Paragraph::new(vec![
+            Line::from(""),
+            kv("used", &bytes_to_human(used)),
+            kv("available", &bytes_to_human(avail)),
+            kv("total", &bytes_to_human(total)),
+        ]),
+        u_lines,
+    );
+    let bar_color = if pct > 90.0 {
+        theme::RED
+    } else if pct > 75.0 {
+        theme::YELLOW
+    } else {
+        theme::GREEN
+    };
+    f.render_widget(
+        Gauge::default()
+            .gauge_style(Style::default().fg(bar_color).bg(theme::SURFACE_LO))
+            .ratio(pct / 100.0)
+            .label(format!("{pct:.0}%")),
+        u_bar,
+    );
+    let _ = gap;
+
+    // Scrub status.
+    let sc = app.fs_scrub.clone().unwrap_or(Value::Null);
+    let status = field(&sc, "status");
+    let color = match status.as_str() {
+        "running" => theme::YELLOW,
+        "finished" => theme::GREEN,
+        "aborted" | "interrupted" => theme::RED,
+        _ => theme::SUBTEXT,
+    };
+    f.render_widget(
+        Paragraph::new(vec![
+            Line::from(Span::styled(" scrub", theme::title())),
+            Line::from(vec![
+                kv_key("status"),
+                Span::styled(status, Style::default().fg(color)),
+            ]),
+            kv("scrubbed", &bytes(sc.get("bytes_scrubbed"))),
+            kv("errors", &field(&sc, "error_summary")),
+        ]),
+        scrub_area,
+    );
 }
 
 fn render_logs(f: &mut Frame, area: Rect, logs: &super::app::Logs, app: &App) {
@@ -729,7 +816,10 @@ fn render_filesystems(f: &mut Frame, area: Rect, app: &App) {
     render_table(
         f,
         area,
-        &format!("filesystems ({})", app.filesystems.len()),
+        &format!(
+            "filesystems ({}) — ↵ devices · i status · m mount · s scrub · D destroy",
+            app.filesystems.len()
+        ),
         &["filesystem", "backend", "status", "state"],
         &[
             Constraint::Min(28),
