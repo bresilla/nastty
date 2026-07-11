@@ -65,6 +65,7 @@ const ID_LOGS: i64 = 18;
 const ID_FILES: i64 = 19;
 const ID_FIREWALL: i64 = 20;
 const ID_NOTIFICATIONS: i64 = 21;
+const ID_DISKS: i64 = 22;
 const ID_TOKEN_CREATE: i64 = 201;
 const ID_STATS: i64 = 102;
 const ID_ALERTS: i64 = 103;
@@ -321,6 +322,8 @@ pub(super) struct App {
     /// File-browser current directory and its listing.
     pub cwd: String,
     pub files: Vec<Value>,
+    /// SMART health per disk (from system.disks), keyed by device name.
+    pub disks: Vec<Value>,
     pub status: String,
     pub show_help: bool,
     pub modal: Modal,
@@ -365,6 +368,7 @@ impl App {
             mem_history: Vec::new(),
             cwd: "/fs".to_string(),
             files: Vec::new(),
+            disks: Vec::new(),
             status: "loading…".to_string(),
             show_help: false,
             modal: Modal::None,
@@ -2463,6 +2467,7 @@ async fn store_response(app: &mut App, id: i64, val: Value, write: &mut WsWrite)
         ID_NUT => app.nut = Some(val),
         ID_FIREWALL => app.firewall = Some(val),
         ID_NOTIFICATIONS => app.notifications = Some(val),
+        ID_DISKS => app.disks = as_array(val),
         ID_LOGS => app.logs = Some(val.as_str().unwrap_or_default().to_string()),
         ID_FILES => app.files = as_array(val),
         ID_SSH => app.ssh = Some(val),
@@ -2582,6 +2587,7 @@ async fn refresh_all(app: &mut App, write: &mut WsWrite) {
         (ID_SSH, "system.ssh.status"),
         (ID_STATS, "system.stats"),
         (ID_ALERTS, "system.alerts"),
+        (ID_DISKS, "system.disks"),
     ] {
         let _ = write.send(client::request(id, method, Value::Null)).await;
     }

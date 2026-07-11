@@ -589,12 +589,42 @@ fn secondary(s: String) -> Span<'static> {
 // ── data tabs ───────────────────────────────────────────────────
 
 fn render_devices(f: &mut Frame, area: Rect, app: &App) {
+    // SMART health from system.disks, keyed by device basename (sda…).
+    let smart_for = |path: &str| -> Option<&Value> {
+        let base = path.rsplit('/').next().unwrap_or(path);
+        app.disks
+            .iter()
+            .find(|d| field(d, "device") == base || field(d, "device") == path)
+    };
     let rows: Vec<Row> = app
         .devices
         .iter()
         .map(|d| {
             let class = field(d, "device_class");
             let in_use = d.get("in_use").and_then(|v| v.as_bool()).unwrap_or(false);
+            let smart = smart_for(&field(d, "path"));
+            let health_cell = match smart {
+                Some(s) => {
+                    let passed = s.get("health_passed").and_then(|v| v.as_bool());
+                    let temp = s
+                        .get("temperature_c")
+                        .and_then(|v| v.as_i64())
+                        .map(|t| format!(" {t}°C"))
+                        .unwrap_or_default();
+                    match passed {
+                        Some(true) => Span::styled(
+                            format!("● SMART ok{temp}"),
+                            Style::default().fg(theme::GREEN),
+                        ),
+                        Some(false) => Span::styled(
+                            format!("● SMART FAIL{temp}"),
+                            Style::default().fg(theme::RED),
+                        ),
+                        None => Span::styled(format!("SMART n/a{temp}"), theme::dim()),
+                    }
+                }
+                None => Span::styled("—", theme::dim()),
+            };
             Row::new(vec![
                 cell2(
                     primary(field(d, "path")),
@@ -612,6 +642,7 @@ fn render_devices(f: &mut Frame, area: Rect, app: &App) {
                     )),
                 ),
                 cell1(Span::styled(bytes(d.get("size_bytes")), theme::text())),
+                cell1(health_cell),
                 cell1(if in_use {
                     Span::styled("● in use", Style::default().fg(theme::PEACH))
                 } else {
@@ -624,13 +655,14 @@ fn render_devices(f: &mut Frame, area: Rect, app: &App) {
     render_table(
         f,
         area,
-        &format!("devices ({})", app.devices.len()),
-        &["device", "class", "size", "state"],
+        &format!("devices ({}) — w wipe", app.devices.len()),
+        &["device", "class", "size", "health", "state"],
         &[
-            Constraint::Min(30),
-            Constraint::Length(18),
-            Constraint::Length(11),
-            Constraint::Length(11),
+            Constraint::Min(26),
+            Constraint::Length(16),
+            Constraint::Length(10),
+            Constraint::Length(16),
+            Constraint::Length(10),
         ],
         rows,
         app.selected,
