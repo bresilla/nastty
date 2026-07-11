@@ -227,6 +227,14 @@ enum FormKind {
     NvmeofAddHost {
         id: String,
     },
+    NfsAddClient {
+        id: String,
+        existing: Vec<Value>,
+    },
+    SmbAddUser {
+        id: String,
+        existing: Vec<String>,
+    },
     EditField {
         method: &'static str,
         key: &'static str,
@@ -257,6 +265,8 @@ pub(super) struct Detail {
     pub rows: Vec<Vec<String>>,
     /// Parallel to `rows`: how to remove each, or None if not removable.
     removes: Vec<Option<(&'static str, Value)>>,
+    /// Parallel to `rows`: Enter action (toggle a flag), or None.
+    toggles: Vec<Option<(&'static str, Value)>>,
     pub selected: usize,
     pub hint: String,
     ctx: DetailCtx,
@@ -275,6 +285,10 @@ enum DetailCtx {
     Iscsi { target_id: String },
     /// NVMe-oF subsystem — add-forms use the subsystem id.
     Nvmeof { subsystem_id: String },
+    /// NFS share — `a` adds a client (needs current clients to append).
+    Nfs { id: String, clients: Vec<Value> },
+    /// SMB share — `a` adds a valid user (needs current users to append).
+    Smb { id: String, users: Vec<String> },
 }
 
 /// Scrollable journal-log viewer.
@@ -1719,11 +1733,13 @@ fn open_fs_devices_detail(app: &mut App) {
         devices.push(path);
     }
     let backend = str_of(fs, "backend");
+    let n = rows.len();
     app.modal = Modal::Detail(Detail {
         title: format!("devices · {name}"),
         headers: vec!["device", "label", "state"],
         rows,
         removes,
+        toggles: vec![None; n],
         selected: 0,
         hint: "a add · x remove · v evacuate · o online · O offline · r ro · w rw".into(),
         ctx: DetailCtx::FsDevices {
@@ -1785,11 +1801,13 @@ fn open_share_detail(app: &mut App) {
                     json!({"target_id": tid, "initiator_iqn": iqn}),
                 )));
             }
+            let n = rows.len();
             app.modal = Modal::Detail(Detail {
                 title: format!("iscsi · {}", str_of(t, "name")),
                 headers: vec!["kind", "value", "detail"],
                 rows,
                 removes,
+                toggles: vec![None; n],
                 selected: 0,
                 hint: "x remove · a LUN · p portal · c ACL".into(),
                 ctx: DetailCtx::Iscsi { target_id: tid },
@@ -1850,17 +1868,104 @@ fn open_share_detail(app: &mut App) {
                     json!({"subsystem_id": sid, "host_nqn": nqn}),
                 )));
             }
+            let n = rows.len();
             app.modal = Modal::Detail(Detail {
                 title: format!("nvme-of · {}", str_of(s, "name")),
                 headers: vec!["kind", "value", "detail"],
                 rows,
                 removes,
+                toggles: vec![None; n],
                 selected: 0,
                 hint: "x remove · a namespace · p port · o host".into(),
                 ctx: DetailCtx::Nvmeof { subsystem_id: sid },
             });
         }
-        SharesSelection::Nfs(_) | SharesSelection::Smb(_) => {}
+        SharesSelection::Nfs(i) => {
+            let Some(s) = app.nfs.get(i) else { return };
+            let id = str_of(s, "id");
+            let clients = s
+                .get("clients")
+                .and_then(|v| v.as_array())
+                .cloned()
+                .unwrap_or_default();
+            let mut rows = Vec::new();
+            let mut removes = Vec::new();
+            for c in &clients {
+                rows.push(vec![str_of(c, "host"), str_of(c, "options")]);
+                let remaining: Vec<Value> = clients
+                    .iter()
+                    .filter(|x| str_of(x, "host") != str_of(c, "host"))
+                    .cloned()
+                    .collect();
+                removes.push(Some((
+                    "share.nfs.update",
+                    json!({"id": id, "clients": remaining}),
+                )));
+            }
+            let n = rows.len();
+            app.modal = Modal::Detail(Detail {
+                title: format!("nfs clients · {}", str_of(s, "path")),
+                headers: vec!["host", "options"],
+                rows,
+                removes,
+                toggles: vec![None; n],
+                selected: 0,
+                hint: "a add client · x remove".into(),
+                ctx: DetailCtx::Nfs { id, clients },
+            });
+        }
+        SharesSelection::Smb(i) => {
+            let Some(s) = app.smb.get(i) else { return };
+            let id = str_of(s, "id");
+            let users: Vec<String> = s
+                .get("valid_users")
+                .and_then(|v| v.as_array())
+                .map(|a| {
+                    a.iter()
+                        .filter_map(|u| u.as_str().map(String::from))
+                        .collect()
+                })
+                .unwrap_or_default();
+            let flag = |k: &str| s.get(k).and_then(|v| v.as_bool()).unwrap_or(false);
+            let mut rows = Vec::new();
+            let mut removes = Vec::new();
+            let mut toggles = Vec::new();
+            // Flag rows: Enter toggles.
+            for (label, key) in [
+                ("read_only", "read_only"),
+                ("browseable", "browseable"),
+                ("guest_ok", "guest_ok"),
+                ("time_machine", "time_machine"),
+            ] {
+                let cur = flag(key);
+                rows.push(vec![
+                    label.into(),
+                    if cur { "yes".into() } else { "no".into() },
+                ]);
+                removes.push(None);
+                toggles.push(Some(("share.smb.update", json!({"id": id, key: !cur}))));
+            }
+            // Valid-user rows: x removes.
+            for u in &users {
+                rows.push(vec![format!("user: {u}"), String::new()]);
+                let remaining: Vec<String> = users.iter().filter(|x| *x != u).cloned().collect();
+                removes.push(Some((
+                    "share.smb.update",
+                    json!({"id": id, "valid_users": remaining}),
+                )));
+                toggles.push(None);
+            }
+            app.modal = Modal::Detail(Detail {
+                title: format!("smb · {}", str_of(s, "name")),
+                headers: vec!["setting", "value"],
+                rows,
+                removes,
+                toggles,
+                selected: 0,
+                hint: "↵ toggle flag · a add user · x remove user".into(),
+                ctx: DetailCtx::Smb { id, users },
+            });
+        }
     }
 }
 
@@ -1892,6 +1997,15 @@ async fn handle_detail_key(app: &mut App, code: KeyCode, write: &mut WsWrite) {
             }
             return;
         }
+        // Enter toggles the selected flag row (SMB flags).
+        KeyCode::Enter => {
+            if let Some(Some((method, params))) = detail.toggles.get(detail.selected).cloned() {
+                app.status = format!("{method}…");
+                let _ = write.send(client::request(ID_ACTION, method, params)).await;
+                app.modal = Modal::None;
+            }
+            return;
+        }
         _ => {}
     }
 
@@ -1908,6 +2022,8 @@ async fn handle_detail_key(app: &mut App, code: KeyCode, write: &mut WsWrite) {
         } => fs_device_action(code, fs, backend, devices.get(sel).cloned(), &free),
         DetailCtx::Iscsi { target_id } => iscsi_add_action(code, target_id),
         DetailCtx::Nvmeof { subsystem_id } => nvmeof_add_action(code, subsystem_id),
+        DetailCtx::Nfs { id, clients } => nfs_add_action(code, id, clients),
+        DetailCtx::Smb { id, users } => smb_add_action(code, id, users),
     };
     match action {
         DetailAction::Open(m) => app.modal = m,
@@ -2026,6 +2142,41 @@ fn iscsi_add_action(code: KeyCode, target_id: &str) -> DetailAction {
             ],
             focus: 0,
             kind: FormKind::IscsiAddAcl { id },
+        })),
+        _ => DetailAction::Nothing,
+    }
+}
+
+fn nfs_add_action(code: KeyCode, id: &str, clients: &[Value]) -> DetailAction {
+    match code {
+        KeyCode::Char('a') => DetailAction::Open(Modal::Form(Form {
+            title: "add NFS client".into(),
+            hint: "host is an IP/CIDR/hostname or * for any".into(),
+            fields: vec![
+                FormField::text("host", "*"),
+                FormField::text("options", "rw,sync,no_subtree_check"),
+            ],
+            focus: 0,
+            kind: FormKind::NfsAddClient {
+                id: id.to_string(),
+                existing: clients.to_vec(),
+            },
+        })),
+        _ => DetailAction::Nothing,
+    }
+}
+
+fn smb_add_action(code: KeyCode, id: &str, users: &[String]) -> DetailAction {
+    match code {
+        KeyCode::Char('a') => DetailAction::Open(Modal::Form(Form {
+            title: "add valid user".into(),
+            hint: "a system/SMB user or @group".into(),
+            fields: vec![FormField::text("user", "")],
+            focus: 0,
+            kind: FormKind::SmbAddUser {
+                id: id.to_string(),
+                existing: users.to_vec(),
+            },
         })),
         _ => DetailAction::Nothing,
     }
@@ -2468,6 +2619,20 @@ fn build_request(form: &mut Form) -> Result<(&'static str, Value), String> {
                 "share.nvmeof.add_host",
                 json!({"subsystem_id": id, "host_nqn": get(0)}),
             ))
+        }
+        FormKind::NfsAddClient { id, existing } => {
+            require(&get(0), "host")?;
+            let mut clients = existing.clone();
+            clients.push(json!({"host": get(0), "options": get(1)}));
+            Ok(("share.nfs.update", json!({"id": id, "clients": clients})))
+        }
+        FormKind::SmbAddUser { id, existing } => {
+            require(&get(0), "user")?;
+            let mut users = existing.clone();
+            if !users.contains(&get(0)) {
+                users.push(get(0));
+            }
+            Ok(("share.smb.update", json!({"id": id, "valid_users": users})))
         }
     }
 }

@@ -796,7 +796,7 @@ fn render_shares(f: &mut Frame, area: Rect, app: &App) {
     render_table(
         f,
         nfs_a,
-        &format!("nfs ({})", app.nfs.len()),
+        &format!("nfs ({}) · ↵ clients", app.nfs.len()),
         &["export", "state"],
         &[Constraint::Min(20), Constraint::Length(8)],
         nfs_rows,
@@ -819,7 +819,7 @@ fn render_shares(f: &mut Frame, area: Rect, app: &App) {
     render_table(
         f,
         smb_a,
-        &format!("smb ({})", app.smb.len()),
+        &format!("smb ({}) · ↵ settings", app.smb.len()),
         &["share", "state"],
         &[Constraint::Min(20), Constraint::Length(8)],
         smb_rows,
@@ -850,7 +850,7 @@ fn render_shares(f: &mut Frame, area: Rect, app: &App) {
     render_table(
         f,
         iscsi_a,
-        &format!("iscsi targets ({})", app.iscsi.len()),
+        &format!("iscsi ({}) · ↵ luns", app.iscsi.len()),
         &["target", "luns"],
         &[Constraint::Min(20), Constraint::Length(10)],
         iscsi_rows,
@@ -881,7 +881,7 @@ fn render_shares(f: &mut Frame, area: Rect, app: &App) {
     render_table(
         f,
         nvme_a,
-        &format!("nvme-of ({})", app.nvmeof.len()),
+        &format!("nvme-of ({}) · ↵ ns", app.nvmeof.len()),
         &["subsystem", "ns"],
         &[Constraint::Min(20), Constraint::Length(8)],
         nvme_rows,
