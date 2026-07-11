@@ -55,9 +55,39 @@ pub struct Session {
     pub client_ip: Option<String>,
 }
 
+/// A long-lived API token (for scripts / non-interactive clients). Only
+/// the argon2 hash is stored; the raw value is shown once at creation.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ApiToken {
+    pub id: String,
+    pub name: String,
+    token_hash: String,
+    pub role: Role,
+    /// When set, restricts visibility to a single filesystem.
+    #[serde(default)]
+    pub filesystem: Option<String>,
+    pub created_at: u64,
+    /// Unix timestamp after which the token is rejected. None = never.
+    #[serde(default)]
+    pub expires_at: Option<u64>,
+}
+
+/// Listing shape for API tokens — never exposes the hash.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ApiTokenInfo {
+    pub id: String,
+    pub name: String,
+    pub role: Role,
+    pub filesystem: Option<String>,
+    pub created_at: u64,
+    pub expires_at: Option<u64>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 struct AuthState {
     users: Vec<User>,
+    #[serde(default)]
+    api_tokens: Vec<ApiToken>,
     initialized: bool,
 }
 
@@ -203,16 +233,110 @@ impl AuthService {
     }
 
     pub async fn validate(&self, token: &str, _client_ip: &str) -> Result<Session, AuthError> {
-        let mut sessions = self.sessions.write().await;
-        let idx = sessions
-            .iter()
-            .position(|s| s.token == token)
-            .ok_or(AuthError::InvalidToken)?;
-        if now().saturating_sub(sessions[idx].created_at) > SESSION_TTL_SECS {
-            sessions.remove(idx);
-            return Err(AuthError::TokenExpired);
+        {
+            let mut sessions = self.sessions.write().await;
+            if let Some(idx) = sessions.iter().position(|s| s.token == token) {
+                if now().saturating_sub(sessions[idx].created_at) > SESSION_TTL_SECS {
+                    sessions.remove(idx);
+                    return Err(AuthError::TokenExpired);
+                }
+                return Ok(sessions[idx].clone());
+            }
         }
-        Ok(sessions[idx].clone())
+        // Not an interactive session — try the API tokens. Only values
+        // with the token prefix pay the argon2 verification cost.
+        if token.starts_with("ntk_") {
+            let state = self.state.read().await;
+            for t in &state.api_tokens {
+                if verify_password(token, &t.token_hash) {
+                    if t.expires_at.is_some_and(|exp| now() > exp) {
+                        return Err(AuthError::TokenExpired);
+                    }
+                    return Ok(Session {
+                        token: token.to_string(),
+                        username: format!("token:{}", t.name),
+                        role: t.role.clone(),
+                        filesystem: t.filesystem.clone(),
+                        owner: None,
+                        created_at: now(),
+                        must_change_password: false,
+                        client_ip: None,
+                    });
+                }
+            }
+        }
+        Err(AuthError::InvalidToken)
+    }
+
+    // ── API tokens ──────────────────────────────────────────────
+
+    /// Create a token; the raw value is returned exactly once.
+    pub async fn create_api_token(
+        &self,
+        name: &str,
+        role: Role,
+        filesystem: Option<String>,
+        expires_in_secs: Option<u64>,
+    ) -> Result<(ApiTokenInfo, String), AuthError> {
+        if name.is_empty() || name.len() > 48 {
+            return Err(AuthError::Internal("token name must be 1-48 chars".into()));
+        }
+        let raw = format!("ntk_{}", new_token());
+        let token = ApiToken {
+            id: uuid::Uuid::new_v4().simple().to_string(),
+            name: name.to_string(),
+            token_hash: hash_password(&raw)?,
+            role,
+            filesystem,
+            created_at: now(),
+            expires_at: expires_in_secs.map(|s| now() + s),
+        };
+        let info = ApiTokenInfo {
+            id: token.id.clone(),
+            name: token.name.clone(),
+            role: token.role.clone(),
+            filesystem: token.filesystem.clone(),
+            created_at: token.created_at,
+            expires_at: token.expires_at,
+        };
+        self.state.write().await.api_tokens.push(token);
+        if let Err(e) = self.save().await {
+            warn!("auth state not persisted: {e}");
+        }
+        info!("created API token '{name}'");
+        Ok((info, raw))
+    }
+
+    pub async fn list_api_tokens(&self) -> Vec<ApiTokenInfo> {
+        self.state
+            .read()
+            .await
+            .api_tokens
+            .iter()
+            .map(|t| ApiTokenInfo {
+                id: t.id.clone(),
+                name: t.name.clone(),
+                role: t.role.clone(),
+                filesystem: t.filesystem.clone(),
+                created_at: t.created_at,
+                expires_at: t.expires_at,
+            })
+            .collect()
+    }
+
+    pub async fn delete_api_token(&self, id: &str) -> Result<(), AuthError> {
+        {
+            let mut state = self.state.write().await;
+            let before = state.api_tokens.len();
+            state.api_tokens.retain(|t| t.id != id);
+            if state.api_tokens.len() == before {
+                return Err(AuthError::Internal(format!("no token with id {id}")));
+            }
+        }
+        if let Err(e) = self.save().await {
+            warn!("auth state not persisted: {e}");
+        }
+        Ok(())
     }
 
     pub async fn logout(&self, token: &str) -> Result<(), AuthError> {

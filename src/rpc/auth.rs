@@ -90,6 +90,40 @@ pub(super) async fn try_route(
             },
             Err(r) => r,
         },
+        "auth.token.list" => ok(req, state.auth.list_api_tokens().await),
+        "auth.token.create" => {
+            #[derive(Deserialize)]
+            struct P {
+                name: String,
+                role: Role,
+                filesystem: Option<String>,
+                expires_in_secs: Option<u64>,
+            }
+            match parse_params::<P>(req) {
+                Ok(p) => match state
+                    .auth
+                    .create_api_token(&p.name, p.role, p.filesystem, p.expires_in_secs)
+                    .await
+                {
+                    Ok((info, raw)) => ok(
+                        req,
+                        serde_json::json!({
+                            "token": raw,
+                            "info": info,
+                        }),
+                    ),
+                    Err(e) => err(req, e),
+                },
+                Err(e) => invalid(req, e),
+            }
+        }
+        "auth.token.delete" => match require_str(req, "id") {
+            Ok(id) => match state.auth.delete_api_token(id).await {
+                Ok(()) => ok(req, "ok"),
+                Err(e) => err(req, e),
+            },
+            Err(r) => r,
+        },
         _ => return None,
     })
 }
