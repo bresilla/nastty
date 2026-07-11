@@ -80,7 +80,7 @@ async fn evaluate_active_alerts(state: &AppState) -> Vec<alerts::ActiveAlert> {
             Vec::new()
         }
     };
-    let mut fs_usage: Vec<alerts::FsUsage> = filesystems
+    let fs_usage: Vec<alerts::FsUsage> = filesystems
         .iter()
         .map(|p| alerts::FsUsage {
             name: p.name.clone(),
@@ -88,14 +88,6 @@ async fn evaluate_active_alerts(state: &AppState) -> Vec<alerts::ActiveAlert> {
             total_bytes: p.total_bytes,
         })
         .collect();
-    // btrfs filesystems count too.
-    if let Ok(btrfs) = state.btrfs.list().await {
-        fs_usage.extend(btrfs.into_iter().map(|f| alerts::FsUsage {
-            name: f.name,
-            used_bytes: f.used_bytes,
-            total_bytes: f.total_bytes,
-        }));
-    }
 
     let disk_health: Vec<nasty_system::DiskHealth> = if state
         .protocols

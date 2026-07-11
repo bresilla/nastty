@@ -13,11 +13,6 @@ pub const METRICS_BASE: &str = "http://127.0.0.1:2138";
 pub struct AppState {
     pub auth: crate::auth::AuthService,
     pub events: EventBus,
-    /// Whether bcachefs-tools is on PATH. When it isn't, `fs.create`
-    /// defaults to the btrfs backend instead.
-    pub bcachefs_available: bool,
-    /// btrfs-progs version when installed (`btrfs --version`).
-    pub btrfs_version: Option<String>,
     pub system: nasty_system::SystemService,
     pub settings: nasty_system::settings::SettingsService,
     pub tuning: nasty_system::tuning::TuningService,
@@ -28,7 +23,6 @@ pub struct AppState {
     pub metrics_client: reqwest::Client,
     pub protocols: nasty_system::protocol::ProtocolService,
     pub filesystems: nasty_storage::FilesystemService,
-    pub btrfs: nasty_storage::BtrfsService,
     pub subvolumes: Arc<nasty_storage::SubvolumeService>,
     pub snapshots: nasty_snapshot::SnapshotService,
     pub nfs: nasty_sharing::NfsService,
@@ -43,23 +37,9 @@ impl AppState {
         let subvolumes = Arc::new(nasty_storage::SubvolumeService::new(
             nasty_storage::FilesystemService::new(),
         ));
-        let bcachefs_available = std::env::var_os("PATH")
-            .map(|paths| std::env::split_paths(&paths).any(|p| p.join("bcachefs").is_file()))
-            .unwrap_or(false);
-        // btrfs-progs version, e.g. "6.18" — None when not installed.
-        let btrfs_version = nasty_common::cmd::run_ok("btrfs", &["--version"])
-            .await
-            .ok()
-            .and_then(|out| {
-                out.split_whitespace()
-                    .find(|w| w.starts_with('v'))
-                    .map(|v| v.trim_start_matches('v').to_string())
-            });
         Self {
             auth: crate::auth::AuthService::new().await,
             events: event_tx,
-            bcachefs_available,
-            btrfs_version,
             system: nasty_system::SystemService::new(None, None),
             settings: nasty_system::settings::SettingsService::new().await,
             tuning: nasty_system::tuning::TuningService::new().await,
@@ -70,7 +50,6 @@ impl AppState {
             metrics_client: reqwest::Client::new(),
             protocols: nasty_system::protocol::ProtocolService::new(),
             filesystems: nasty_storage::FilesystemService::new(),
-            btrfs: nasty_storage::BtrfsService::new(),
             snapshots: nasty_snapshot::SnapshotService::new(subvolumes.clone()),
             subvolumes,
             nfs: nasty_sharing::NfsService::new(),

@@ -41,9 +41,6 @@ serve:
 tui:
 	@$(CARGO) run --bin nastty
 
-e2e-btrfs:
-	@$(CARGO) build --bin nasttyd
-	@sudo ./scripts/btrfs-e2e.sh ./target/debug/nasttyd
 
 metrics:
 	@cd ../nasty/engine && $(CARGO) run -p nasty-metrics

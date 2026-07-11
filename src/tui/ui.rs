@@ -547,18 +547,13 @@ fn render_system_card(f: &mut Frame, area: Rect, app: &App) {
         kv("timezone", &field(&info, "timezone")),
         Line::from(""),
         kv("engine", &field(&info, "version")),
-        Line::from(vec![kv_key("btrfs"), backend_span(btrfs_version(&info))]),
-        Line::from(vec![
-            kv_key("bcachefs"),
-            backend_span(bcachefs_version(&info)),
-        ]),
+        Line::from(vec![kv_key("bcachefs"), bcachefs_span(&info)]),
         kv("kvm", &field(&info, "kvm_available")),
     ];
-    // Only alarm when there is NO usable storage backend at all.
-    if btrfs_version(&info).is_none() && bcachefs_version(&info).is_none() {
+    if !bcachefs_available(&info) {
         lines.push(Line::from(""));
         lines.push(Line::from(Span::styled(
-            "  ✗ no storage backend — install btrfs-progs or bcachefs-tools",
+            "  ✗ bcachefs unavailable — install bcachefs-tools + kernel module",
             Style::default().fg(theme::RED),
         )));
     }
@@ -574,18 +569,10 @@ fn bcachefs_version(info: &Value) -> Option<String> {
     }
 }
 
-/// btrfs-progs version injected by nasttyd into system.info.
-fn btrfs_version(info: &Value) -> Option<String> {
-    info.get("btrfs_version")
-        .and_then(|v| v.as_str())
-        .map(|v| v.to_string())
-}
-
-/// A backend line: its version, or a calm dim "not installed".
-fn backend_span(version: Option<String>) -> Span<'static> {
-    match version {
+fn bcachefs_span(info: &Value) -> Span<'static> {
+    match bcachefs_version(info) {
         Some(v) => Span::styled(format!("● {v}"), Style::default().fg(theme::GREEN)),
-        None => Span::styled("○ not installed", theme::dim()),
+        None => Span::styled("✗ not available", Style::default().fg(theme::RED)),
     }
 }
 
@@ -780,13 +767,9 @@ fn render_devices(f: &mut Frame, area: Rect, app: &App) {
 }
 
 fn render_filesystems(f: &mut Frame, area: Rect, app: &App) {
-    // The empty state tells the truth about what this host can create.
     let empty_text = match &app.system_info {
-        Some(info) if btrfs_version(info).is_none() && !bcachefs_available(info) => {
-            "no storage backend — install btrfs-progs (or bcachefs-tools) first"
-        }
         Some(info) if !bcachefs_available(info) => {
-            "no filesystems — create one with fs.create (backend: btrfs)"
+            "bcachefs not available — install bcachefs-tools and the kernel module (see README)"
         }
         _ => "no filesystems — create one with fs.create",
     };
@@ -795,18 +778,11 @@ fn render_filesystems(f: &mut Frame, area: Rect, app: &App) {
         .iter()
         .map(|fs| {
             let mounted = fs.get("mounted").and_then(|v| v.as_bool()).unwrap_or(false);
-            let backend = field(fs, "backend");
-            let backend_color = match backend.as_str() {
-                "btrfs" => theme::GREEN,
-                "bcachefs" => theme::MAUVE,
-                _ => theme::MUTED,
-            };
             Row::new(vec![
                 cell2(
                     primary(field(fs, "name")),
                     secondary(field(fs, "mount_point")),
                 ),
-                cell1(Span::styled(backend, Style::default().fg(backend_color))),
                 cell1(theme::badge(mounted, "mounted", "unmounted")),
                 cell1(Span::styled(field(fs, "state"), theme::subtle())),
             ])
@@ -820,10 +796,9 @@ fn render_filesystems(f: &mut Frame, area: Rect, app: &App) {
             "filesystems ({}) — ↵ devices · i status · m mount · s scrub · D destroy",
             app.filesystems.len()
         ),
-        &["filesystem", "backend", "status", "state"],
+        &["filesystem", "status", "state"],
         &[
             Constraint::Min(28),
-            Constraint::Length(10),
             Constraint::Length(14),
             Constraint::Length(12),
         ],
@@ -1094,7 +1069,6 @@ fn render_snapshots(f: &mut Frame, area: Rect, app: &App) {
                     any(s, &["subvolume"]),
                     Style::default().fg(theme::BLUE),
                 )),
-                cell1(Span::styled(field(s, "backend"), theme::dim())),
             ])
             .height(2)
         })
@@ -1106,12 +1080,8 @@ fn render_snapshots(f: &mut Frame, area: Rect, app: &App) {
             "snapshots ({}) — n new · c clone · d delete",
             app.snapshots.len()
         ),
-        &["snapshot", "subvolume", "backend"],
-        &[
-            Constraint::Min(30),
-            Constraint::Length(20),
-            Constraint::Length(10),
-        ],
+        &["snapshot", "subvolume"],
+        &[Constraint::Min(30), Constraint::Length(24)],
         rows,
         app.selected,
         "no snapshots — take one from the Subvolumes tab with s",
@@ -1791,7 +1761,7 @@ mod tests {
             "hostname": "tron", "kernel": "7.0.0-27-generic",
             "uptime_seconds": 11520, "timezone": "UTC",
             "version": "0.0.13", "bcachefs_version": "unknown",
-            "btrfs_version": "6.17.1", "kvm_available": true,
+            "kvm_available": true,
         }));
         app.devices = vec![
             serde_json::json!({"path":"/dev/sda","device_class":"ssd","dev_type":"disk",
@@ -1813,7 +1783,7 @@ mod tests {
         app.smb_users = vec![serde_json::json!({"username":"media"})];
         app.smb_groups = vec![serde_json::json!({"name":"family"})];
         app.snapshots = vec![serde_json::json!({
-            "name":"data@daily","filesystem":"tank","subvolume":"data","backend":"btrfs"
+            "name":"data@daily","filesystem":"tank","subvolume":"data"
         })];
         app.stats = Some(serde_json::json!({
             "cpu": {"count": 24, "load_1": 3.6, "load_5": 2.0, "load_15": 1.2, "temp_c": 44},
@@ -1822,7 +1792,7 @@ mod tests {
         app.cpu_history = vec![5, 8, 12, 20, 15, 30, 25, 40, 35, 20, 18, 22, 30, 15];
         app.mem_history = vec![30, 31, 32, 32, 33, 31, 30, 32, 34, 33, 32, 31, 32, 32];
         app.filesystems = vec![serde_json::json!({
-            "name":"tank","backend":"btrfs","mounted":true,"mount_point":"/fs/tank",
+            "name":"tank","mounted":true,"mount_point":"/fs/tank",
             "total_bytes":4000000000000u64,"used_bytes":3350000000000u64
         })];
         app.alerts = vec![serde_json::json!({

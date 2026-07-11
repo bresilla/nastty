@@ -90,7 +90,6 @@
             # and mounting bcachefs needs kernel support — a dev shell can't
             # provide a kernel module.
             pkgs.bcachefs-tools
-            pkgs.btrfs-progs
             pkgs.nfs-utils
             pkgs.samba
             pkgs.smartmontools

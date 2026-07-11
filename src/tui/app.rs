@@ -209,7 +209,6 @@ enum FormKind {
     },
     FsDeviceAdd {
         filesystem: String,
-        backend: String,
     },
     IscsiAddLun {
         id: String,
@@ -293,11 +292,7 @@ pub(super) struct Detail {
 enum DetailCtx {
     /// Filesystem member devices; `devices[i]` is the device path, parallel
     /// to rows, for the online/offline/ro/rw/evacuate single-key actions.
-    FsDevices {
-        fs: String,
-        devices: Vec<String>,
-        backend: String,
-    },
+    FsDevices { fs: String, devices: Vec<String> },
     /// iSCSI target — add-forms use the target id.
     Iscsi { target_id: String },
     /// NVMe-oF subsystem — add-forms use the subsystem id.
@@ -1022,32 +1017,22 @@ fn open_create_form(app: &mut App) {
     let form = match app.tab {
         TAB_FILESYSTEMS => {
             let free = app.free_device_paths();
-            let backends: Vec<String> = vec!["btrfs".into(), "bcachefs".into()];
             Form {
-                title: "new filesystem / pool".into(),
+                title: "new bcachefs filesystem".into(),
                 hint: "space toggles a device · ◂▸ moves between devices".into(),
                 fields: vec![
-                    FormField::select("backend", backends, 0),
                     FormField::text("name", "tank"),
                     FormField::multi("devices", free),
-                    FormField::select(
-                        "raid",
-                        vec![
-                            "single".into(),
-                            "raid0".into(),
-                            "raid1".into(),
-                            "raid10".into(),
-                        ],
-                        0,
-                    ),
+                    FormField::text("replicas", "1"),
                     FormField::select(
                         "compression",
-                        vec!["none".into(), "zstd".into(), "lzo".into(), "lz4".into()],
+                        vec!["none".into(), "zstd".into(), "lz4".into(), "gzip".into()],
                         1,
                     ),
-                    FormField::text("replicas (bcachefs)", "1"),
+                    FormField::select("encryption", vec!["no".into(), "yes".into()], 0),
+                    FormField::secret("passphrase"),
                 ],
-                focus: 1,
+                focus: 0,
                 kind: FormKind::CreateFs,
             }
         }
@@ -1222,7 +1207,7 @@ fn open_subvolume_form(app: &mut App, action: SubvolAction) {
     let form = match action {
         SubvolAction::Clone => Form {
             title: format!("clone {name}"),
-            hint: "writable copy (works on btrfs + bcachefs)".into(),
+            hint: "writable copy of the subvolume".into(),
             fields: vec![FormField::text("new name", "")],
             focus: 0,
             kind: FormKind::SubvolClone {
@@ -1232,7 +1217,7 @@ fn open_subvolume_form(app: &mut App, action: SubvolAction) {
         },
         SubvolAction::Edit => Form {
             title: format!("edit {name}"),
-            hint: "bcachefs only — btrfs returns not-supported".into(),
+            hint: "update compression and comments".into(),
             fields: vec![
                 FormField::select(
                     "compression",
@@ -1910,7 +1895,6 @@ fn open_fs_devices_detail(app: &mut App) {
         )));
         devices.push(path);
     }
-    let backend = str_of(fs, "backend");
     let n = rows.len();
     app.modal = Modal::Detail(Detail {
         title: format!("devices · {name}"),
@@ -1920,11 +1904,7 @@ fn open_fs_devices_detail(app: &mut App) {
         toggles: vec![None; n],
         selected: 0,
         hint: "a add · x remove · v evacuate · o online · O offline · r ro · w rw".into(),
-        ctx: DetailCtx::FsDevices {
-            fs: name,
-            devices,
-            backend,
-        },
+        ctx: DetailCtx::FsDevices { fs: name, devices },
     });
 }
 
@@ -2193,11 +2173,9 @@ async fn handle_detail_key(app: &mut App, code: KeyCode, write: &mut WsWrite) {
     let ctx = detail.ctx.clone();
     let free = app.free_device_paths();
     let action = match &ctx {
-        DetailCtx::FsDevices {
-            fs,
-            devices,
-            backend,
-        } => fs_device_action(code, fs, backend, devices.get(sel).cloned(), &free),
+        DetailCtx::FsDevices { fs, devices } => {
+            fs_device_action(code, fs, devices.get(sel).cloned(), &free)
+        }
         DetailCtx::Iscsi { target_id } => iscsi_add_action(code, target_id),
         DetailCtx::Nvmeof { subsystem_id } => nvmeof_add_action(code, subsystem_id),
         DetailCtx::Nfs { id, clients } => nfs_add_action(code, id, clients),
@@ -2223,12 +2201,10 @@ enum DetailAction {
 fn fs_device_action(
     code: KeyCode,
     fs: &str,
-    backend: &str,
     dev_path: Option<String>,
     free: &[String],
 ) -> DetailAction {
     let fs = fs.to_string();
-    let backend = backend.to_string();
     match code {
         KeyCode::Char('a') => {
             let free = free.to_vec();
@@ -2249,10 +2225,7 @@ fn fs_device_action(
                     FormField::text("durability", "1"),
                 ],
                 focus: 0,
-                kind: FormKind::FsDeviceAdd {
-                    filesystem: fs,
-                    backend,
-                },
+                kind: FormKind::FsDeviceAdd { filesystem: fs },
             }))
         }
         KeyCode::Char('v') => match dev_path {
@@ -2575,8 +2548,9 @@ fn build_request(form: &mut Form) -> Result<(&'static str, Value), String> {
             }
         }
         FormKind::CreateFs => {
-            require(&get(1), "name")?;
-            let devices: Vec<String> = get(2)
+            // Fields: name, devices(multi), replicas, compression, encryption, passphrase.
+            require(&get(0), "name")?;
+            let devices: Vec<String> = get(1)
                 .split(',')
                 .map(|s| s.trim().to_string())
                 .filter(|s| !s.is_empty())
@@ -2584,34 +2558,27 @@ fn build_request(form: &mut Form) -> Result<(&'static str, Value), String> {
             if devices.is_empty() {
                 return Err("select at least one device (space toggles)".into());
             }
-            let compression = match get(4).as_str() {
+            let replicas: u32 = get(2).parse().unwrap_or(1).max(1);
+            let compression = match get(3).as_str() {
                 "none" => None,
                 c => Some(c.to_string()),
             };
-            if get(0) == "btrfs" {
-                Ok((
-                    "fs.create",
-                    json!({
-                        "backend": "btrfs",
-                        "name": get(1),
-                        "devices": devices,
-                        "raid": get(3),
-                        "compression": compression,
-                    }),
-                ))
-            } else {
-                let replicas: u32 = get(5).parse().unwrap_or(1).max(1);
-                let specs: Vec<Value> = devices.iter().map(|d| json!({"path": d})).collect();
-                Ok((
-                    "fs.create",
-                    json!({
-                        "name": get(1),
-                        "devices": specs,
-                        "replicas": replicas,
-                        "compression": compression,
-                    }),
-                ))
+            let encryption = get(4) == "yes";
+            if encryption && get(5).is_empty() {
+                return Err("encryption needs a passphrase".into());
             }
+            let specs: Vec<Value> = devices.iter().map(|d| json!({"path": d})).collect();
+            Ok((
+                "fs.create",
+                json!({
+                    "name": get(0),
+                    "devices": specs,
+                    "replicas": replicas,
+                    "compression": compression,
+                    "encryption": encryption,
+                    "passphrase": if get(5).is_empty() { Value::Null } else { json!(get(5)) },
+                }),
+            ))
         }
         FormKind::CreateSubvolume => {
             require(&get(1), "name")?;
@@ -2715,34 +2682,23 @@ fn build_request(form: &mut Form) -> Result<(&'static str, Value), String> {
                 .unwrap_or_else(|_| Value::String(get(0)));
             Ok((method, json!({ *key: v })))
         }
-        FormKind::FsDeviceAdd {
-            filesystem,
-            backend,
-        } => {
+        FormKind::FsDeviceAdd { filesystem } => {
             let device = get(0);
             if device.starts_with('(') {
                 return Err("no free device selected".into());
             }
-            if backend == "btrfs" {
-                // btrfs expects a plain device string.
-                Ok((
-                    "fs.device.add",
-                    json!({"filesystem": filesystem, "device": device}),
-                ))
-            } else {
-                // bcachefs expects a DeviceSpec object.
-                let mut spec = json!({"path": device});
-                if !get(1).is_empty() {
-                    spec["label"] = json!(get(1));
-                }
-                if let Ok(d) = get(2).parse::<u32>() {
-                    spec["durability"] = json!(d);
-                }
-                Ok((
-                    "fs.device.add",
-                    json!({"filesystem": filesystem, "device": spec}),
-                ))
+            // bcachefs expects a DeviceSpec object.
+            let mut spec = json!({"path": device});
+            if !get(1).is_empty() {
+                spec["label"] = json!(get(1));
             }
+            if let Ok(d) = get(2).parse::<u32>() {
+                spec["durability"] = json!(d);
+            }
+            Ok((
+                "fs.device.add",
+                json!({"filesystem": filesystem, "device": spec}),
+            ))
         }
         FormKind::IscsiAddLun { id } => {
             require(&get(0), "backstore_path")?;
@@ -3145,7 +3101,7 @@ mod tests {
     }
 
     #[test]
-    fn fs_form_builds_btrfs_by_default() {
+    fn fs_form_builds_bcachefs_create() {
         let mut app = App::for_test();
         app.tab = TAB_FILESYSTEMS;
         app.devices = vec![serde_json::json!({"path":"/dev/sdx","in_use":false})];
@@ -3153,15 +3109,15 @@ mod tests {
         let Modal::Form(mut form) = std::mem::replace(&mut app.modal, Modal::None) else {
             panic!("expected form");
         };
-        // The device multi-select starts unchecked: submitting is refused.
+        // The device multi-select (field 1) starts unchecked: submit refused.
         assert!(build_request(&mut form).is_err());
-        if let Some((items, _)) = &mut form.fields[2].multi {
+        if let Some((items, _)) = &mut form.fields[1].multi {
             items[0].1 = true; // space-toggle the first device
         }
         let (method, params) = build_request(&mut form).expect("build");
         assert_eq!(method, "fs.create");
-        assert_eq!(params["backend"], "btrfs");
-        assert_eq!(params["devices"][0], "/dev/sdx");
+        assert!(params.get("backend").is_none(), "no backend field");
+        assert_eq!(params["devices"][0]["path"], "/dev/sdx");
         assert_eq!(params["compression"], "zstd");
     }
 

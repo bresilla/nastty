@@ -1,14 +1,13 @@
 # nastty
 
-A local NAS built on the [nasty](https://github.com/nasty-project/nasty)
-crates: a small API server (`nasttyd`) and a terminal UI (`nastty`), with
-**bcachefs and btrfs** storage backends.
+A local **bcachefs** NAS built on the
+[nasty](https://github.com/nasty-project/nasty) crates: a small API server
+(`nasttyd`) and a terminal UI (`nastty`).
 
-The heavy lifting — filesystems, subvolumes, snapshots, NFS/SMB/iSCSI/NVMe-oF
-sharing, protocol lifecycle — comes from the `nasty-*` library crates,
-consumed from [our fork](https://github.com/bresilla/nasty) (branch `nastty`).
-The fork carries only additive changes (the btrfs backend module), so it
-rebases onto upstream nearly conflict-free. This repo owns two thin pieces:
+The heavy lifting — bcachefs filesystems, subvolumes, snapshots,
+NFS/SMB/iSCSI/NVMe-oF sharing, protocol lifecycle — comes from the upstream
+`nasty-*` library crates, consumed directly as pinned git dependencies (no
+fork). This repo owns two thin pieces:
 
 - **`nasttyd`** — the server shell:
   - username/password sessions (cookie + bearer token)
@@ -37,19 +36,11 @@ sudo chown $USER /var/lib/nasty        # only if running nasttyd unprivileged
 
 Optional: `wsdd` (Windows discovery), `smartmontools` (disk health).
 
-Storage backends — at least one is required:
-
-- **btrfs** (the easy path): `sudo apt install btrfs-progs` — the driver is
-  already in the Ubuntu kernel. `fs.create` with `"backend": "btrfs"` gives
-  you filesystems, subvolumes, snapshots + clones, scrub, device add/remove,
-  and compression tuning today. bcachefs-only concepts (encryption/keys,
-  member states, online fsck) return an explicit "not supported on btrfs".
-- **bcachefs**: Ubuntu ships no package; build
-  [bcachefs-tools](https://github.com/koverstreet/bcachefs-tools) from source
-  plus its out-of-tree kernel module.
-
-Everything else (device listing, shares, protocols) works with either — any
-directory under `/fs` can back an NFS/SMB share.
+**bcachefs is required.** Ubuntu ships no package: build
+[bcachefs-tools](https://github.com/koverstreet/bcachefs-tools) from source
+plus its out-of-tree kernel module. Everything else (device listing, shares,
+protocols) still works without it — any directory under `/fs` can back an
+NFS/SMB share — but filesystem create/mount needs bcachefs.
 
 Mutations that touch the system (mkfs, mount, systemctl, exportfs,
 smbpasswd) need root; read-only calls degrade gracefully without it.
@@ -62,11 +53,10 @@ make serve                 # cargo run --bin nasttyd
 nasttyd --listen 127.0.0.1:2137
 ```
 
-**A storage backend is required**: the server refuses to start unless
-bcachefs-tools or btrfs-progs is installed, and tells you how to get each.
-To develop the API/TUI on a machine that isn't the NAS, pass
-`--allow-missing-deps`. At startup a dependency check also warns
-(non-fatally) about whichever backend is missing, absent NFS/Samba
+**bcachefs-tools is required**: the server refuses to start without it and
+tells you where to get it. To develop the API/TUI on a machine that isn't
+the NAS, pass `--allow-missing-deps`. At startup a dependency check also
+warns (non-fatally) about missing kernel bcachefs support, absent NFS/Samba
 packages, and missing state directories — each with the command to fix it.
 
 First run creates user `admin` / password `admin` with a forced password
@@ -141,23 +131,15 @@ another client show up live.
 
 ## Updating to latest upstream
 
-The `nasty-*` dependencies come from the fork
-[bresilla/nasty](https://github.com/bresilla/nasty), branch `nastty` —
-upstream plus additive commits (the btrfs backend). To pull in new
-upstream work:
+The `nasty-*` dependencies are pinned to one upstream commit in
+`Cargo.toml`. To update:
 
-```sh
-cd ../nasty                       # the fork checkout
-git fetch upstream
-git rebase upstream/main nastty   # additive commits rebase cleanly
-git push -f origin nastty
-cd ../nastty
-cargo update && make verify
-```
-
-Fix any small API drift in `src/rpc/` (the handlers are thin ports of
-`engine/nasty-engine/src/router/*.rs` — diff those files upstream when
-something breaks).
+1. Change the `rev = "..."` on all five `nasty-*` entries to the new
+   `nasty-project/nasty` commit.
+2. `cargo update && make verify`.
+3. Fix any small API drift in `src/rpc/` (the handlers are thin ports of
+   `engine/nasty-engine/src/router/*.rs` — diff those files upstream when
+   something breaks).
 
 ## Development
 

@@ -12,98 +12,14 @@ pub(super) async fn try_route(
     state: &AppState,
     session: &Session,
 ) -> Option<Response> {
-    // btrfs pre-route for filesystem-addressed subvolume ops.
-    if let Some(fs_name) = str_param(req, "filesystem")
-        && state.btrfs.manages(fs_name).await
-    {
-        if session.filesystem.as_deref().is_some_and(|p| p != fs_name) {
-            return Some(err(req, "access denied"));
-        }
-        let fs_name = fs_name.to_string();
-        return Some(match req.method.as_str() {
-            "subvolume.list" => match state.btrfs.subvolume_list(&fs_name).await {
-                Ok(v) => ok(req, v),
-                Err(e) => err(req, e),
-            },
-            "subvolume.create" => match require_str(req, "name") {
-                Ok(name) => match state.btrfs.subvolume_create(&fs_name, name).await {
-                    Ok(v) => ok(req, v),
-                    Err(e) => err(req, e),
-                },
-                Err(r) => r,
-            },
-            "subvolume.delete" => match require_str(req, "name") {
-                Ok(name) => match state.btrfs.subvolume_delete(&fs_name, name).await {
-                    Ok(()) => ok(req, "ok"),
-                    Err(e) => err(req, e),
-                },
-                Err(r) => r,
-            },
-            "subvolume.get" => match require_str(req, "name") {
-                Ok(name) => match state.btrfs.subvolume_get(&fs_name, name).await {
-                    Ok(v) => ok(req, v),
-                    Err(e) => err(req, e),
-                },
-                Err(r) => r,
-            },
-            "subvolume.children" => match require_str(req, "name") {
-                Ok(name) => match state.btrfs.subvolume_children(&fs_name, name).await {
-                    Ok(v) => ok(req, v),
-                    Err(e) => err(req, e),
-                },
-                Err(r) => r,
-            },
-            "subvolume.clone" => match (require_str(req, "name"), require_str(req, "new_name")) {
-                (Ok(name), Ok(new_name)) => {
-                    match state.btrfs.subvolume_clone(&fs_name, name, new_name).await {
-                        Ok(v) => ok(req, v),
-                        Err(e) => err(req, e),
-                    }
-                }
-                (Err(r), _) | (_, Err(r)) => r,
-            },
-            _ => err(
-                req,
-                format!("{} is not supported on btrfs filesystems", req.method),
-            ),
-        });
-    }
     Some(match req.method.as_str() {
-        // Merged across backends: bcachefs subvolumes plus every btrfs
-        // filesystem's subvolumes. Owner-scoped sessions see no btrfs
-        // entries (btrfs has no owner concept).
         "subvolume.list_all" => {
             let fs_filter = session.filesystem.as_deref();
             let owner_filter = session.owner.as_deref();
-            let mut merged: Vec<serde_json::Value> =
-                match state.subvolumes.list_all(fs_filter, owner_filter).await {
-                    Ok(v) => v
-                        .into_iter()
-                        .map(|s| serde_json::to_value(s).unwrap_or_default())
-                        .collect(),
-                    Err(e) => return Some(err(req, e)),
-                };
-            if owner_filter.is_none() {
-                let btrfs_fss = match state.btrfs.list().await {
-                    Ok(v) => v,
-                    Err(e) => return Some(err(req, e)),
-                };
-                for fs in btrfs_fss {
-                    if fs_filter.is_some_and(|f| f != fs.name) || !fs.mounted {
-                        continue;
-                    }
-                    match state.btrfs.subvolume_list(&fs.name).await {
-                        Ok(subs) => merged.extend(
-                            subs.into_iter()
-                                .map(|s| serde_json::to_value(s).unwrap_or_default()),
-                        ),
-                        Err(e) => {
-                            tracing::warn!("btrfs subvolume list for {}: {e}", fs.name)
-                        }
-                    }
-                }
+            match state.subvolumes.list_all(fs_filter, owner_filter).await {
+                Ok(v) => ok(req, v),
+                Err(e) => err(req, e),
             }
-            ok(req, merged)
         }
         "subvolume.list" => match require_str(req, "filesystem") {
             Ok(fs_name) => {

@@ -13,12 +13,16 @@ pub(super) async fn try_route(
     state: &AppState,
     session: &Session,
 ) -> Option<Response> {
-    // btrfs pre-route: handles btrfs-backed filesystems and the merged
-    // fs.list; everything else falls through to the bcachefs arms below.
-    if let Some(resp) = btrfs_route(req, state, session).await {
-        return Some(resp);
-    }
     Some(match req.method.as_str() {
+        "fs.list" => match state.filesystems.list().await {
+            Ok(mut v) => {
+                if let Some(ref fs_name) = session.filesystem {
+                    v.retain(|p| &p.name == fs_name);
+                }
+                ok(req, v)
+            }
+            Err(e) => err(req, e),
+        },
         "fs.get" => match require_str(req, "name") {
             Ok(name) => {
                 if session.filesystem.as_deref().is_some_and(|p| p != name) {
@@ -285,142 +289,4 @@ pub(super) async fn try_route(
         },
         _ => return None,
     })
-}
-
-/// Backend-aware arms. Returns `Some(response)` when the request targets
-/// btrfs (or is the merged `fs.list`), `None` to fall through to bcachefs.
-async fn btrfs_route(req: &Request, state: &AppState, session: &Session) -> Option<Response> {
-    match req.method.as_str() {
-        // Merged listing: bcachefs entries (tagged) + btrfs entries.
-        "fs.list" => {
-            let mut merged: Vec<serde_json::Value> = Vec::new();
-            match state.filesystems.list().await {
-                Ok(mut v) => {
-                    if let Some(ref fs_name) = session.filesystem {
-                        v.retain(|p| &p.name == fs_name);
-                    }
-                    for fs in v {
-                        let mut val = serde_json::to_value(fs).unwrap_or_default();
-                        if let Some(obj) = val.as_object_mut() {
-                            obj.insert("backend".into(), "bcachefs".into());
-                        }
-                        merged.push(val);
-                    }
-                }
-                Err(e) => return Some(err(req, e)),
-            }
-            match state.btrfs.list().await {
-                Ok(mut v) => {
-                    if let Some(ref fs_name) = session.filesystem {
-                        v.retain(|p| &p.name == fs_name);
-                    }
-                    merged.extend(
-                        v.into_iter()
-                            .map(|fs| serde_json::to_value(fs).unwrap_or_default()),
-                    );
-                }
-                Err(e) => return Some(err(req, e)),
-            }
-            Some(ok(req, merged))
-        }
-        // Creation picks the backend from an optional `backend` param;
-        // without one, btrfs is the default on hosts that have no
-        // bcachefs-tools (nothing else could succeed there anyway).
-        "fs.create"
-            if str_param(req, "backend") == Some("btrfs")
-                || (str_param(req, "backend").is_none() && !state.bcachefs_available) =>
-        {
-            match parse_params::<nasty_storage::btrfs::CreateBtrfsRequest>(req) {
-                Ok(p) => match state.btrfs.create(p).await {
-                    Ok(v) => Some(ok(req, v)),
-                    Err(e) => Some(err(req, e)),
-                },
-                Err(e) => Some(invalid(req, e)),
-            }
-        }
-        // Every other fs.* method addresses a filesystem by `name` (fs.*)
-        // or `filesystem` (fs.device.*). When that name is btrfs-managed,
-        // handle it here — with an explicit "not supported" for the
-        // bcachefs-only concepts, so callers never see a lying
-        // "filesystem not found" from the bcachefs service.
-        m if m.starts_with("fs.") => {
-            let name = str_param(req, "name").or_else(|| str_param(req, "filesystem"))?;
-            if session.filesystem.as_deref().is_some_and(|p| p != name) {
-                return None; // let the bcachefs arm produce the denial
-            }
-            if !state.btrfs.manages(name).await {
-                return None;
-            }
-            Some(match req.method.as_str() {
-                // A bcachefs create colliding with an existing btrfs name.
-                "fs.create" => err(req, format!("filesystem '{name}' already exists (btrfs)")),
-                "fs.get" => match state.btrfs.get(name).await {
-                    Ok(v) => ok(req, v),
-                    Err(e) => err(req, e),
-                },
-                "fs.mount" => match state.btrfs.mount(name).await {
-                    Ok(v) => ok(req, v),
-                    Err(e) => err(req, e),
-                },
-                "fs.unmount" => match state.btrfs.unmount(name).await {
-                    Ok(()) => ok(req, "ok"),
-                    Err(e) => err(req, e),
-                },
-                "fs.destroy" => {
-                    if let Some(reason) = check_filesystem_in_use(state, name).await {
-                        err(req, reason)
-                    } else {
-                        match state.btrfs.destroy(name).await {
-                            Ok(()) => ok(req, "ok"),
-                            Err(e) => err(req, e),
-                        }
-                    }
-                }
-                "fs.usage" => match state.btrfs.usage(name).await {
-                    Ok(v) => ok(req, v),
-                    Err(e) => err(req, e),
-                },
-                "fs.scrub.start" => match state.btrfs.scrub_start(name).await {
-                    Ok(()) => ok(req, "ok"),
-                    Err(e) => err(req, e),
-                },
-                "fs.scrub.status" => match state.btrfs.scrub_status(name).await {
-                    Ok(v) => ok(req, v),
-                    Err(e) => err(req, e),
-                },
-                "fs.scrub.cancel" => match state.btrfs.scrub_cancel(name).await {
-                    Ok(()) => ok(req, "ok"),
-                    Err(e) => err(req, e),
-                },
-                "fs.options.update" => match str_param(req, "compression") {
-                    Some(c) => match state.btrfs.update_compression(name, c).await {
-                        Ok(v) => ok(req, v),
-                        Err(e) => err(req, e),
-                    },
-                    None => invalid(req, "btrfs supports updating: compression"),
-                },
-                "fs.device.add" => match require_str(req, "device") {
-                    Ok(device) => match state.btrfs.device_add(name, device).await {
-                        Ok(v) => ok(req, v),
-                        Err(e) => err(req, e),
-                    },
-                    Err(r) => r,
-                },
-                "fs.device.remove" => match require_str(req, "device") {
-                    Ok(device) => match state.btrfs.device_remove(name, device).await {
-                        Ok(v) => ok(req, v),
-                        Err(e) => err(req, e),
-                    },
-                    Err(r) => r,
-                },
-                // bcachefs-only concepts: encryption/keys, member states,
-                // online fsck, per-device labels.
-                other => err(
-                    req,
-                    format!("{other} is not supported on btrfs filesystems"),
-                ),
-            })
-        }
-        _ => None,
-    }
 }

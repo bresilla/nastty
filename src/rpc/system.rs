@@ -14,21 +14,7 @@ pub(super) async fn try_route(
     session: &Session,
 ) -> Option<Response> {
     Some(match req.method.as_str() {
-        "system.info" => {
-            // Upstream's SystemInfo only knows bcachefs; annotate it with
-            // the btrfs backend's availability, same as fs.list does.
-            let mut val = serde_json::to_value(state.system.info().await).unwrap_or_default();
-            if let Some(obj) = val.as_object_mut() {
-                obj.insert(
-                    "btrfs_version".into(),
-                    match &state.btrfs_version {
-                        Some(v) => serde_json::Value::String(v.clone()),
-                        None => serde_json::Value::Null,
-                    },
-                );
-            }
-            ok(req, val)
-        }
+        "system.info" => ok(req, state.system.info().await),
         "system.health" => ok(req, state.system.health().await),
         "system.hardware.summary" => ok(req, nasty_system::hardware::system_summary().await),
 

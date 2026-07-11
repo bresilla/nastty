@@ -54,42 +54,29 @@ fn doctor(allow_missing_deps: bool) -> Result<(), String> {
             .unwrap_or(false)
     };
 
-    // At least one storage backend must be usable; each missing one warns.
-    let have_bcachefs = have("bcachefs");
-    let have_btrfs = have("mkfs.btrfs");
-    if !have_bcachefs && !have_btrfs {
+    // bcachefs-tools is the core of this NAS — refuse to start without it.
+    if !have("bcachefs") {
         if !allow_missing_deps {
             return Err(
-                "error: no storage backend available — nastty needs bcachefs-tools or \
-                 btrfs-progs.\n\
-                 \x20 btrfs:    sudo apt install btrfs-progs   (in the Ubuntu kernel already)\n\
-                 \x20 bcachefs: build https://github.com/koverstreet/bcachefs-tools + kernel module\n\
+                "error: bcachefs-tools is not installed — nastty is a bcachefs NAS and cannot \
+                 work without it.\n\
+                 Ubuntu ships no package; build it from source:\n\
+                 \x20   https://github.com/koverstreet/bcachefs-tools\n\
                  (or start with --allow-missing-deps to develop the API/TUI on this machine)"
                     .to_string(),
             );
         }
-        warn!("no storage backend installed — running in dev mode (--allow-missing-deps)");
-    }
-    if !have_bcachefs {
-        warn!(
-            "bcachefs-tools not installed — bcachefs filesystems unavailable \
-             (build from https://github.com/koverstreet/bcachefs-tools)"
-        );
+        warn!("bcachefs-tools NOT installed — running in dev mode (--allow-missing-deps)");
     } else {
         let kernel_bcachefs = std::fs::read_to_string("/proc/filesystems")
             .map(|s| s.contains("bcachefs"))
             .unwrap_or(false);
         if !kernel_bcachefs {
             warn!(
-                "kernel has NO bcachefs support (not in /proc/filesystems) — bcachefs mounts \
-                 will fail. Install the out-of-tree bcachefs module for your kernel"
+                "kernel has NO bcachefs support (not in /proc/filesystems) — mounts will fail. \
+                 Install the out-of-tree bcachefs module for your kernel"
             );
         }
-    }
-    if !have_btrfs {
-        warn!(
-            "btrfs-progs not installed — btrfs filesystems unavailable (sudo apt install btrfs-progs)"
-        );
     }
     if !have("exportfs") {
         warn!(
@@ -116,9 +103,6 @@ fn doctor(allow_missing_deps: bool) -> Result<(), String> {
 async fn restore(state: Arc<AppState>) {
     let failures = state.filesystems.restore_mounts().await;
     for f in &failures {
-        warn!("mount restore failed: {f}");
-    }
-    for f in state.btrfs.restore_mounts().await {
         warn!("mount restore failed: {f}");
     }
     let remapped = state.subvolumes.restore_block_devices().await;

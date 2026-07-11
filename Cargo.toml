@@ -19,11 +19,11 @@ name = "nastty"
 path = "src/bin/nastty.rs"
 
 [dependencies]
-nasty-common = { git = "https://github.com/bresilla/nasty", branch = "nastty" }
-nasty-storage = { git = "https://github.com/bresilla/nasty", branch = "nastty" }
-nasty-sharing = { git = "https://github.com/bresilla/nasty", branch = "nastty" }
-nasty-snapshot = { git = "https://github.com/bresilla/nasty", branch = "nastty" }
-nasty-system = { git = "https://github.com/bresilla/nasty", branch = "nastty" }
+nasty-common = { git = "https://github.com/nasty-project/nasty", rev = "4ad3fa304b57b8ce82774a36693aa87769d1478b" }
+nasty-storage = { git = "https://github.com/nasty-project/nasty", rev = "4ad3fa304b57b8ce82774a36693aa87769d1478b" }
+nasty-sharing = { git = "https://github.com/nasty-project/nasty", rev = "4ad3fa304b57b8ce82774a36693aa87769d1478b" }
+nasty-snapshot = { git = "https://github.com/nasty-project/nasty", rev = "4ad3fa304b57b8ce82774a36693aa87769d1478b" }
+nasty-system = { git = "https://github.com/nasty-project/nasty", rev = "4ad3fa304b57b8ce82774a36693aa87769d1478b" }
 
 tokio = { version = "1", features = ["full"] }
 axum = { version = "0.8", features = ["ws"] }
