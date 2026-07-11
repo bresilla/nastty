@@ -57,6 +57,9 @@ const ID_ALERT_RULES: i64 = 12;
 const ID_SETTINGS: i64 = 13;
 const ID_SSH: i64 = 14;
 const ID_TOKENS: i64 = 15;
+const ID_TUNING: i64 = 16;
+const ID_NUT: i64 = 17;
+const ID_LOGS: i64 = 18;
 const ID_TOKEN_CREATE: i64 = 201;
 const ID_STATS: i64 = 102;
 const ID_ALERTS: i64 = 103;
@@ -211,7 +214,8 @@ enum FormKind {
     NvmeofAddHost {
         id: String,
     },
-    EditSetting {
+    EditField {
+        method: &'static str,
         key: &'static str,
     },
 }
@@ -285,6 +289,9 @@ pub(super) struct App {
     pub alerts: Vec<Value>,
     pub alert_rules: Vec<Value>,
     pub settings: Option<Value>,
+    pub tuning: Option<Value>,
+    pub nut: Option<Value>,
+    pub logs: Option<String>,
     pub ssh: Option<Value>,
     pub stats: Option<Value>,
     /// CPU load (percent of cores) history for the dashboard sparkline.
@@ -324,6 +331,9 @@ impl App {
             alerts: Vec::new(),
             alert_rules: Vec::new(),
             settings: None,
+            tuning: None,
+            nut: None,
+            logs: None,
             ssh: None,
             stats: None,
             cpu_history: Vec::new(),
@@ -364,40 +374,96 @@ impl App {
         }
     }
 
-    /// The System tab is a flat list of editable settings + SSH keys.
+    /// The System tab: editable settings, tuning, NUT, and SSH keys.
     pub(super) fn system_rows(&self) -> Vec<SystemRow> {
-        let s = self.settings.clone().unwrap_or(Value::Null);
-        let sval = |k: &str| {
-            s.get(k)
+        fn dval(src: &Value, k: &str) -> String {
+            src.get(k)
                 .map(|v| match v {
                     Value::String(x) => x.clone(),
                     Value::Bool(b) => b.to_string(),
+                    Value::Null => "-".into(),
                     other => other.to_string(),
                 })
                 .unwrap_or_else(|| "-".into())
-        };
+        }
+        let s = self.settings.clone().unwrap_or(Value::Null);
+        let edit =
+            |label: &str, method: &'static str, key: &'static str, value: String| SystemRow {
+                label: label.to_string(),
+                value,
+                kind: SystemRowKind::Edit { method, key },
+            };
         let mut rows = vec![
             SystemRow {
-                label: "hostname".into(),
-                value: sval("hostname"),
-                kind: SystemRowKind::Setting("hostname"),
+                label: "── general ──".into(),
+                value: String::new(),
+                kind: SystemRowKind::Info,
             },
-            SystemRow {
-                label: "timezone".into(),
-                value: sval("timezone"),
-                kind: SystemRowKind::Setting("timezone"),
-            },
+            edit(
+                "hostname",
+                "system.settings.update",
+                "hostname",
+                dval(&s, "hostname"),
+            ),
+            edit(
+                "timezone",
+                "system.settings.update",
+                "timezone",
+                dval(&s, "timezone"),
+            ),
             SystemRow {
                 label: "24h clock".into(),
-                value: sval("clock_24h"),
-                kind: SystemRowKind::SettingToggle("clock_24h"),
+                value: dval(&s, "clock_24h"),
+                kind: SystemRowKind::Toggle {
+                    method: "system.settings.update",
+                    key: "clock_24h",
+                },
             },
-            SystemRow {
-                label: "temp unit".into(),
-                value: sval("temp_unit"),
-                kind: SystemRowKind::Setting("temp_unit"),
-            },
+            edit(
+                "temp unit",
+                "system.settings.update",
+                "temp_unit",
+                dval(&s, "temp_unit"),
+            ),
         ];
+
+        if let Some(t) = &self.tuning {
+            rows.push(SystemRow {
+                label: "── tuning ──".into(),
+                value: String::new(),
+                kind: SystemRowKind::Info,
+            });
+            for (label, key) in [
+                ("nfs threads", "nfs_threads"),
+                ("smb max connections", "smb_max_connections"),
+                ("iscsi cmdsn depth", "iscsi_default_cmdsn_depth"),
+                ("vm dirty ratio", "vm_dirty_ratio"),
+                ("vm dirty bg ratio", "vm_dirty_background_ratio"),
+            ] {
+                rows.push(edit(label, "system.tuning.update", key, dval(t, key)));
+            }
+        }
+
+        if let Some(n) = &self.nut {
+            rows.push(SystemRow {
+                label: "── UPS (NUT) ──".into(),
+                value: String::new(),
+                kind: SystemRowKind::Info,
+            });
+            for (label, key) in [
+                ("mode", "mode"),
+                ("ups name", "ups_name"),
+                ("shutdown at %", "shutdown_on_battery_percent"),
+            ] {
+                rows.push(edit(label, "system.nut.config.update", key, dval(n, key)));
+            }
+        }
+
+        rows.push(SystemRow {
+            label: "── access ──".into(),
+            value: String::new(),
+            kind: SystemRowKind::Info,
+        });
         if let Some(ssh) = &self.ssh {
             let pw = ssh
                 .get("password_auth")
@@ -497,13 +563,19 @@ pub(super) struct SystemRow {
 }
 
 pub(super) enum SystemRowKind {
-    /// Editable free-text setting (system.settings.update key).
-    Setting(&'static str),
-    /// Boolean setting flipped directly on Enter/e.
-    SettingToggle(&'static str),
+    /// Editable free-text field: `method({key: value})`.
+    Edit {
+        method: &'static str,
+        key: &'static str,
+    },
+    /// Boolean field flipped directly on Enter/e.
+    Toggle {
+        method: &'static str,
+        key: &'static str,
+    },
     /// An authorized SSH key (deletable).
     SshKey(String),
-    /// Display-only.
+    /// Display-only (section headers, read-only values).
     Info,
 }
 
@@ -1326,24 +1398,22 @@ async fn edit_system_row(app: &mut App, write: &mut WsWrite) {
         return;
     };
     match &row.kind {
-        SystemRowKind::Setting(key) => {
+        SystemRowKind::Edit { method, key } => {
+            let (method, key) = (*method, *key);
             app.modal = Modal::Form(Form {
                 title: format!("set {}", row.label),
                 hint: String::new(),
                 fields: vec![FormField::text("value", &row.value)],
                 focus: 0,
-                kind: FormKind::EditSetting { key },
+                kind: FormKind::EditField { method, key },
             });
         }
-        SystemRowKind::SettingToggle(key) => {
+        SystemRowKind::Toggle { method, key } => {
             let current = row.value == "true";
+            let (method, key) = (*method, *key);
             app.status = format!("updating {key}…");
             let _ = write
-                .send(client::request(
-                    ID_ACTION,
-                    "system.settings.update",
-                    json!({ *key: !current }),
-                ))
+                .send(client::request(ID_ACTION, method, json!({ key: !current })))
                 .await;
         }
         SystemRowKind::SshKey(_) | SystemRowKind::Info => {}
@@ -1973,9 +2043,15 @@ fn build_request(form: &mut Form) -> Result<(&'static str, Value), String> {
                 }),
             ))
         }
-        FormKind::EditSetting { key } => {
+        FormKind::EditField { method, key } => {
             require(&get(0), "value")?;
-            Ok(("system.settings.update", json!({ *key: get(0) })))
+            // Numeric-looking values go through as numbers so tuning/NUT
+            // integer fields validate server-side.
+            let v: Value = get(0)
+                .parse::<i64>()
+                .map(Value::from)
+                .unwrap_or_else(|_| Value::String(get(0)));
+            Ok((method, json!({ *key: v })))
         }
         FormKind::FsDeviceAdd { filesystem } => {
             let device = get(0);
@@ -2125,6 +2201,9 @@ async fn store_response(app: &mut App, id: i64, val: Value, write: &mut WsWrite)
         ID_ALERT_RULES => app.alert_rules = as_array(val),
         ID_ALERTS => app.alerts = as_array(val),
         ID_SETTINGS => app.settings = Some(val),
+        ID_TUNING => app.tuning = Some(val),
+        ID_NUT => app.nut = Some(val),
+        ID_LOGS => app.logs = Some(val.as_str().unwrap_or_default().to_string()),
         ID_SSH => app.ssh = Some(val),
         ID_STATS => {
             // Derive sparkline points: CPU = load1 as % of cores,
@@ -2231,6 +2310,8 @@ async fn refresh_all(app: &mut App, write: &mut WsWrite) {
         (ID_NVMEOF, "share.nvmeof.list"),
         (ID_ALERT_RULES, "alert.rules.list"),
         (ID_SETTINGS, "system.settings.get"),
+        (ID_TUNING, "system.tuning.get"),
+        (ID_NUT, "system.nut.config.get"),
         (ID_SSH, "system.ssh.status"),
         (ID_STATS, "system.stats"),
         (ID_ALERTS, "system.alerts"),

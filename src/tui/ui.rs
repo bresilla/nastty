@@ -1090,15 +1090,29 @@ fn render_alerts(f: &mut Frame, area: Rect, app: &App) {
 }
 
 fn render_system(f: &mut Frame, area: Rect, app: &App) {
+    use super::app::SystemRowKind;
     let rows_data = app.system_rows();
     let rows: Vec<Row> = rows_data
         .iter()
         .map(|r| {
+            // Section-header rows (Info with empty value) render as a
+            // single dim label spanning the row.
+            let is_header = matches!(r.kind, SystemRowKind::Info) && r.value.is_empty();
+            if is_header {
+                return Row::new(vec![
+                    Cell::from(Span::styled(
+                        format!(" {}", r.label),
+                        theme::title().add_modifier(Modifier::DIM),
+                    )),
+                    Cell::from(""),
+                ])
+                .height(1);
+            }
             let kind = match r.kind {
-                super::app::SystemRowKind::Setting(_)
-                | super::app::SystemRowKind::SettingToggle(_) => "setting",
-                super::app::SystemRowKind::SshKey(_) => "ssh",
-                super::app::SystemRowKind::Info => "info",
+                SystemRowKind::Edit { .. } => "edit",
+                SystemRowKind::Toggle { .. } => "toggle",
+                SystemRowKind::SshKey(_) => "ssh",
+                SystemRowKind::Info => "info",
             };
             Row::new(vec![
                 cell2(primary(r.label.clone()), secondary(kind.to_string())),
