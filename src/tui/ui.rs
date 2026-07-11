@@ -11,7 +11,7 @@ use serde_json::Value;
 use super::app::{App, Confirm, Form, Modal, TABS, UsersSelection};
 use super::theme;
 
-const TAB_ICONS: [&str; 10] = ["⌂", "⛁", "▤", "▦", "◷", "⇄", "☰", "◉", "◍", "⚙"];
+const TAB_ICONS: [&str; 11] = ["⌂", "⛁", "▤", "▦", "◷", "⇄", "🗀", "☰", "◉", "◍", "⚙"];
 
 pub(super) fn render_app(f: &mut Frame, app: &App) {
     let chunks = Layout::vertical([Constraint::Length(3), Constraint::Min(0)]).split(f.area());
@@ -23,10 +23,11 @@ pub(super) fn render_app(f: &mut Frame, app: &App) {
         3 => render_subvolumes(f, chunks[1], app),
         4 => render_snapshots(f, chunks[1], app),
         5 => render_shares(f, chunks[1], app),
-        6 => render_protocols(f, chunks[1], app),
-        7 => render_users(f, chunks[1], app),
-        8 => render_alerts(f, chunks[1], app),
-        9 => render_system(f, chunks[1], app),
+        6 => render_files(f, chunks[1], app),
+        7 => render_protocols(f, chunks[1], app),
+        8 => render_users(f, chunks[1], app),
+        9 => render_alerts(f, chunks[1], app),
+        10 => render_system(f, chunks[1], app),
         _ => render_overview(f, chunks[1], app),
     }
     match &app.modal {
@@ -857,6 +858,47 @@ fn render_shares(f: &mut Frame, area: Rect, app: &App) {
     );
 }
 
+fn render_files(f: &mut Frame, area: Rect, app: &App) {
+    let rows: Vec<Row> = app
+        .files
+        .iter()
+        .map(|e| {
+            let is_dir = e.get("is_dir").and_then(|v| v.as_bool()).unwrap_or(false);
+            let (icon, color) = if is_dir {
+                ("🗀", theme::ACCENT)
+            } else {
+                ("🗎", theme::TEXT)
+            };
+            let size = if is_dir {
+                "—".to_string()
+            } else {
+                bytes(e.get("size_bytes"))
+            };
+            Row::new(vec![
+                Cell::from(Line::from(vec![
+                    Span::raw(" "),
+                    Span::styled(format!("{icon} "), Style::default().fg(color)),
+                    Span::styled(field(e, "name"), Style::default().fg(color)),
+                ])),
+                Cell::from(Line::from(Span::styled(size, theme::subtle())).right_aligned()),
+            ])
+        })
+        .collect();
+    render_table(
+        f,
+        area,
+        &format!(
+            "{} — ↵ open · ⌫ up · n folder · R rename · d delete",
+            app.cwd
+        ),
+        &["name", "size"],
+        &[Constraint::Min(30), Constraint::Length(12)],
+        rows,
+        app.selected,
+        "empty folder",
+    );
+}
+
 fn render_protocols(f: &mut Frame, area: Rect, app: &App) {
     let rows: Vec<Row> = app
         .protocols
@@ -1516,7 +1558,7 @@ mod tests {
     #[test]
     fn renders_protocols_tab_with_data() {
         let mut app = App::for_test();
-        app.tab = 6;
+        app.tab = 7;
         app.protocols = vec![
             serde_json::json!({"name":"nfs","display_name":"NFS","enabled":true,"running":true}),
             serde_json::json!({"name":"smb","display_name":"SMB","enabled":false,"running":false}),
@@ -1656,7 +1698,7 @@ mod tests {
         })];
         app.selected = 1;
 
-        for tab in [0usize, 1, 4, 5, 6, 7, 8, 9] {
+        for tab in [0usize, 1, 4, 5, 6, 7, 8, 9, 10] {
             app.tab = tab;
             let mut terminal = Terminal::new(TestBackend::new(110, 26)).unwrap();
             terminal.draw(|f| render_app(f, &app)).unwrap();

@@ -16,13 +16,14 @@ use super::Term;
 
 pub(super) type WsWrite = SplitSink<WsStream, Message>;
 
-pub(super) const TABS: [&str; 10] = [
+pub(super) const TABS: [&str; 11] = [
     "Overview",
     "Devices",
     "Filesystems",
     "Subvolumes",
     "Snapshots",
     "Shares",
+    "Files",
     "Protocols",
     "Users",
     "Alerts",
@@ -33,10 +34,11 @@ const TAB_FILESYSTEMS: usize = 2;
 const TAB_SUBVOLUMES: usize = 3;
 const TAB_SNAPSHOTS: usize = 4;
 const TAB_SHARES: usize = 5;
-const TAB_PROTOCOLS: usize = 6;
-const TAB_USERS: usize = 7;
-const TAB_ALERTS: usize = 8;
-const TAB_SYSTEM: usize = 9;
+const TAB_FILES: usize = 6;
+const TAB_PROTOCOLS: usize = 7;
+const TAB_USERS: usize = 8;
+const TAB_ALERTS: usize = 9;
+const TAB_SYSTEM: usize = 10;
 
 // Stable request ids: one per query kind, so responses route without a
 // pending-request map.
@@ -60,6 +62,7 @@ const ID_TOKENS: i64 = 15;
 const ID_TUNING: i64 = 16;
 const ID_NUT: i64 = 17;
 const ID_LOGS: i64 = 18;
+const ID_FILES: i64 = 19;
 const ID_TOKEN_CREATE: i64 = 201;
 const ID_STATS: i64 = 102;
 const ID_ALERTS: i64 = 103;
@@ -193,6 +196,12 @@ enum FormKind {
     CreateAlertRule,
     AddSshKey,
     CreateToken,
+    Mkdir {
+        parent: String,
+    },
+    RenameFile {
+        path: String,
+    },
     FsDeviceAdd {
         filesystem: String,
     },
@@ -305,6 +314,9 @@ pub(super) struct App {
     pub cpu_history: Vec<u64>,
     /// Memory-used percent history for the dashboard sparkline.
     pub mem_history: Vec<u64>,
+    /// File-browser current directory and its listing.
+    pub cwd: String,
+    pub files: Vec<Value>,
     pub status: String,
     pub show_help: bool,
     pub modal: Modal,
@@ -345,6 +357,8 @@ impl App {
             stats: None,
             cpu_history: Vec::new(),
             mem_history: Vec::new(),
+            cwd: "/fs".to_string(),
+            files: Vec::new(),
             status: "loading…".to_string(),
             show_help: false,
             modal: Modal::None,
@@ -371,6 +385,7 @@ impl App {
             TAB_SUBVOLUMES => self.subvolumes.len(),
             TAB_SNAPSHOTS => self.snapshots.len(),
             TAB_SHARES => self.nfs.len() + self.smb.len() + self.iscsi.len() + self.nvmeof.len(),
+            TAB_FILES => self.files.len(),
             TAB_PROTOCOLS => self.protocols.len(),
             TAB_USERS => {
                 self.users.len() + self.smb_users.len() + self.smb_groups.len() + self.tokens.len()
@@ -693,18 +708,22 @@ async fn handle_input(app: &mut App, ev: Event, write: &mut WsWrite) {
         KeyCode::Tab | KeyCode::Right | KeyCode::Char('l') => {
             app.tab = (app.tab + 1) % TABS.len();
             app.selected = 0;
+            on_tab_enter(app, write).await;
         }
         KeyCode::BackTab | KeyCode::Left | KeyCode::Char('h') => {
             app.tab = (app.tab + TABS.len() - 1) % TABS.len();
             app.selected = 0;
+            on_tab_enter(app, write).await;
         }
         KeyCode::Char(d @ '1'..='9') => {
             app.tab = (d as usize - '1' as usize).min(TABS.len() - 1);
             app.selected = 0;
+            on_tab_enter(app, write).await;
         }
         KeyCode::Char('0') => {
             app.tab = TABS.len() - 1;
             app.selected = 0;
+            on_tab_enter(app, write).await;
         }
         KeyCode::Down | KeyCode::Char('j') => {
             let len = app.current_len();
@@ -725,8 +744,10 @@ async fn handle_input(app: &mut App, ev: Event, write: &mut WsWrite) {
             TAB_SYSTEM => edit_system_row(app, write).await,
             TAB_FILESYSTEMS => open_fs_devices_detail(app),
             TAB_SHARES => open_share_detail(app),
+            TAB_FILES => files_enter(app, write).await,
             _ => {}
         },
+        KeyCode::Backspace if app.tab == TAB_FILES => files_up(app, write).await,
         KeyCode::Char('n') => open_create_form(app),
         KeyCode::Char('d') => open_delete_confirm(app),
         KeyCode::Char('D') if app.tab == TAB_FILESYSTEMS => open_destroy_confirm(app),
@@ -742,6 +763,7 @@ async fn handle_input(app: &mut App, ev: Event, write: &mut WsWrite) {
         KeyCode::Char('L') if app.tab == TAB_SYSTEM => open_logs(app, write).await,
         KeyCode::Char('c') if app.tab == TAB_SNAPSHOTS => open_clone_snapshot_form(app),
         KeyCode::Char('w') if app.tab == TAB_DEVICES => open_wipe_confirm(app),
+        KeyCode::Char('R') if app.tab == TAB_FILES => open_rename_form(app),
         KeyCode::Char('p') if app.tab == TAB_USERS => open_password_form(app),
         KeyCode::Char('g') if app.tab == TAB_USERS => open_group_member_form(app, true),
         KeyCode::Char('G') if app.tab == TAB_USERS => open_group_member_form(app, false),
@@ -974,6 +996,15 @@ fn open_create_form(app: &mut App) {
             fields: vec![FormField::text("public key", "")],
             focus: 0,
             kind: FormKind::AddSshKey,
+        },
+        TAB_FILES => Form {
+            title: format!("new folder in {}", app.cwd),
+            hint: String::new(),
+            fields: vec![FormField::text("name", "")],
+            focus: 0,
+            kind: FormKind::Mkdir {
+                parent: app.cwd.clone(),
+            },
         },
         TAB_USERS => match app.users_selection() {
             UsersSelection::Account(_) => Form {
@@ -1264,6 +1295,28 @@ fn open_delete_confirm(app: &mut App) {
                 }
             }
         },
+        TAB_FILES => {
+            let Some(entry) = app.files.get(app.selected) else {
+                return;
+            };
+            let path = str_of(entry, "path");
+            let is_dir = entry
+                .get("is_dir")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false);
+            Confirm {
+                message: format!(
+                    "delete {} '{}'{}?",
+                    if is_dir { "folder" } else { "file" },
+                    str_of(entry, "name"),
+                    if is_dir { " and everything in it" } else { "" }
+                ),
+                type_to_confirm: None,
+                input: String::new(),
+                method: "files.delete",
+                params: json!({"path": path}),
+            }
+        }
         TAB_ALERTS => {
             let Some(rule) = app.alert_rules.get(app.selected) else {
                 return;
@@ -1469,6 +1522,77 @@ async fn edit_system_row(app: &mut App, write: &mut WsWrite) {
         }
         SystemRowKind::SshKey(_) | SystemRowKind::Info => {}
     }
+}
+
+// ── file browser ────────────────────────────────────────────────
+
+/// Re-browse the current directory when entering the Files tab.
+async fn on_tab_enter(app: &mut App, write: &mut WsWrite) {
+    if app.tab == TAB_FILES {
+        browse_cwd(app, write).await;
+    }
+}
+
+async fn browse_cwd(app: &mut App, write: &mut WsWrite) {
+    let cwd = app.cwd.clone();
+    let _ = write
+        .send(client::request(
+            ID_FILES,
+            "files.browse",
+            json!({"path": cwd}),
+        ))
+        .await;
+}
+
+async fn files_enter(app: &mut App, write: &mut WsWrite) {
+    let Some(entry) = app.files.get(app.selected) else {
+        return;
+    };
+    if entry
+        .get("is_dir")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false)
+    {
+        app.cwd = str_of(entry, "path");
+        app.selected = 0;
+        browse_cwd(app, write).await;
+    } else {
+        app.status = format!(
+            "{} ({} bytes)",
+            str_of(entry, "name"),
+            entry
+                .get("size_bytes")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(0)
+        );
+    }
+}
+
+async fn files_up(app: &mut App, write: &mut WsWrite) {
+    if app.cwd == "/fs" || app.cwd.is_empty() {
+        return;
+    }
+    app.cwd = std::path::Path::new(&app.cwd)
+        .parent()
+        .map(|p| p.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "/fs".into());
+    app.selected = 0;
+    browse_cwd(app, write).await;
+}
+
+fn open_rename_form(app: &mut App) {
+    let Some(entry) = app.files.get(app.selected) else {
+        return;
+    };
+    let path = str_of(entry, "path");
+    let name = str_of(entry, "name");
+    app.modal = Modal::Form(Form {
+        title: format!("rename {name}"),
+        hint: String::new(),
+        fields: vec![FormField::text("new name", &name)],
+        focus: 0,
+        kind: FormKind::RenameFile { path },
+    });
 }
 
 // ── drill-down detail views ─────────────────────────────────────
@@ -2071,6 +2195,14 @@ fn build_request(form: &mut Form) -> Result<(&'static str, Value), String> {
             require(&get(0), "public key")?;
             Ok(("system.ssh.add_key", json!({"key": get(0)})))
         }
+        FormKind::Mkdir { parent } => {
+            require(&get(0), "name")?;
+            Ok(("files.mkdir", json!({"path": parent, "name": get(0)})))
+        }
+        FormKind::RenameFile { path } => {
+            require(&get(0), "new name")?;
+            Ok(("files.rename", json!({"path": path, "new_name": get(0)})))
+        }
         FormKind::CreateToken => {
             require(&get(0), "name")?;
             let filesystem = match get(2).as_str() {
@@ -2255,6 +2387,7 @@ async fn store_response(app: &mut App, id: i64, val: Value, write: &mut WsWrite)
         ID_TUNING => app.tuning = Some(val),
         ID_NUT => app.nut = Some(val),
         ID_LOGS => app.logs = Some(val.as_str().unwrap_or_default().to_string()),
+        ID_FILES => app.files = as_array(val),
         ID_SSH => app.ssh = Some(val),
         ID_STATS => {
             // Derive sparkline points: CPU = load1 as % of cores,
@@ -2294,6 +2427,10 @@ async fn store_response(app: &mut App, id: i64, val: Value, write: &mut WsWrite)
             app.status = "✓ done".to_string();
             // Auth/SMB-account mutations broadcast no event; refresh all.
             refresh_all(app, write).await;
+            // File operations aren't part of refresh_all — re-browse.
+            if app.tab == TAB_FILES {
+                browse_cwd(app, write).await;
+            }
         }
         id if app.pending_snapshots.contains_key(&id) => {
             let fs = app.pending_snapshots.remove(&id).unwrap_or_default();

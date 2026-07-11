@@ -3,6 +3,7 @@
 
 mod alerts;
 mod auth;
+mod files;
 mod fs;
 mod service;
 mod share;
@@ -208,8 +209,18 @@ fn is_read_only(method: &str) -> bool {
             method,
             "system.info"
                 | "system.health"
+                | "system.alerts"
+                | "system.stats"
+                | "system.disks"
+                | "system.hardware.summary"
+                | "system.metrics.history"
+                | "system.metrics.prometheus"
+                | "system.network.get"
+                | "system.logs"
+                | "system.logs.units"
                 | "device.list"
                 | "auth.me"
+                | "files.browse"
                 | "fs.usage"
                 | "subvolume.list_all"
                 | "subvolume.children"
@@ -231,6 +242,7 @@ fn is_operator_allowed(method: &str) -> bool {
         || method.starts_with("share.")
         || method.starts_with("smb.")
         || method.starts_with("service.protocol.")
+        || method.starts_with("files.")
         || matches!(method, "fs.mount" | "fs.unmount")
 }
 
@@ -321,6 +333,7 @@ async fn route(req: &Request, state: &AppState, session: &Session) -> Response {
     let resp = match prefix {
         "auth" => auth::try_route(req, state, session).await,
         "alert" => alerts::try_route(req, state, session).await,
+        "files" => files::try_route(req, state, session).await,
         "fs" | "device" => fs::try_route(req, state, session).await,
         "subvolume" => subvolume::try_route(req, state, session).await,
         "snapshot" => snapshot::try_route(req, state, session).await,
