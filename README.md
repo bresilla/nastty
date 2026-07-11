@@ -61,22 +61,6 @@ nastty serve --allow-missing-deps
 nastty tui --server http://192.168.1.10:2137 --user admin
 ```
 
-## TUI controls
-
-| Key | Action |
-| --- | --- |
-| `←` / `→`, `h` / `l` | Change section |
-| `Tab` / `Shift-Tab` | Change view |
-| `↑` / `↓`, `j` / `k` | Select an item |
-| `Enter` | Open controls for the selected item |
-| `Space` | Open details |
-| `/` or `:` | Open the command palette |
-| `?` | Show help for the current view |
-| `1`–`9`, `0` | Jump directly to a view |
-
-The TUI manages devices, filesystems, subvolumes, snapshots, files, shares,
-protocols, users, alerts, and system settings.
-
 ## API
 
 ```sh
@@ -85,17 +69,6 @@ curl http://127.0.0.1:2137/metrics
 ```
 
 The TUI connects to the JSON-RPC WebSocket endpoint at `/ws`.
-
-## Development
-
-```sh
-make build          # debug build
-make build-release  # optimized build
-make test           # tests
-make verify         # complete validation
-make serve          # run the server
-make tui            # run the TUI
-```
 
 ## Releases
 
