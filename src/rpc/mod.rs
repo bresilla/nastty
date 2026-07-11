@@ -216,6 +216,7 @@ fn is_read_only(method: &str) -> bool {
                 | "system.metrics.history"
                 | "system.metrics.prometheus"
                 | "system.network.get"
+                | "system.firewall.restrictions"
                 | "system.logs"
                 | "system.logs.units"
                 | "device.list"
@@ -340,6 +341,7 @@ async fn route(req: &Request, state: &AppState, session: &Session) -> Response {
         "share" => share::try_route(req, state, session).await,
         "smb" => smb::try_route(req, state, session).await,
         "service" => service::try_route(req, state, session).await,
+        "notifications" => system::try_route(req, state, session).await,
         "system" => {
             // `system.alerts` lives with the alert rules; the rest is system.
             if req.method == "system.alerts" {

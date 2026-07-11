@@ -223,6 +223,68 @@ pub(super) async fn try_route(
         }
         "system.nut.status" => ok(req, state.nut.status().await),
 
+        // ── firewall ────────────────────────────────────────────
+        "system.firewall.status" => ok(req, state.firewall.status().await),
+        "system.firewall.restrictions" => ok(req, state.firewall.get_restrictions().await),
+        "system.firewall.restrict" => {
+            if session.role != Role::Admin {
+                return Some(err(req, "admin only"));
+            }
+            #[derive(serde::Deserialize)]
+            struct P {
+                service: String,
+                #[serde(default)]
+                sources: Vec<String>,
+                #[serde(default)]
+                interfaces: Vec<String>,
+            }
+            match parse_params::<P>(req) {
+                Ok(p) => match state
+                    .firewall
+                    .set_restriction(&p.service, p.sources, p.interfaces)
+                    .await
+                {
+                    Ok(()) => ok(req, "ok"),
+                    Err(e) => err(req, e),
+                },
+                Err(e) => invalid(req, e),
+            }
+        }
+
+        // ── notifications (alert delivery) ──────────────────────
+        "notifications.config.get" => ok(
+            req,
+            nasty_system::notifications::NotificationConfig::load().redacted(),
+        ),
+        "notifications.config.update" => {
+            if session.role != Role::Admin {
+                return Some(err(req, "admin only"));
+            }
+            match parse_params::<nasty_system::notifications::NotificationConfig>(req) {
+                Ok(config) => match config.apply_update().await {
+                    Ok(()) => ok(req, "ok"),
+                    Err(e) => err(req, e),
+                },
+                Err(e) => invalid(req, e),
+            }
+        }
+        "notifications.test" => {
+            match parse_params::<nasty_system::notifications::ChannelType>(req) {
+                Ok(channel) => match nasty_system::notifications::test_channel(&channel).await {
+                    Ok(msg) => ok(req, msg),
+                    Err(e) => err(req, e),
+                },
+                Err(e) => invalid(req, e),
+            }
+        }
+        "notifications.test_saved" => match require_str(req, "id") {
+            Ok(id) => match nasty_system::notifications::test_saved_channel(id).await {
+                Ok(msg) => ok(req, msg),
+                Err(e) => err(req, e),
+            },
+            Err(r) => r,
+        },
+
         // ── SSH access ──────────────────────────────────────────
         "system.ssh.status" => {
             let password_auth = tokio::fs::read_to_string("/var/lib/nasty/sshd_override.conf")
