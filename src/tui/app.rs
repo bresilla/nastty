@@ -63,6 +63,8 @@ const ID_TUNING: i64 = 16;
 const ID_NUT: i64 = 17;
 const ID_LOGS: i64 = 18;
 const ID_FILES: i64 = 19;
+const ID_FIREWALL: i64 = 20;
+const ID_NOTIFICATIONS: i64 = 21;
 const ID_TOKEN_CREATE: i64 = 201;
 const ID_STATS: i64 = 102;
 const ID_ALERTS: i64 = 103;
@@ -307,6 +309,8 @@ pub(super) struct App {
     pub settings: Option<Value>,
     pub tuning: Option<Value>,
     pub nut: Option<Value>,
+    pub firewall: Option<Value>,
+    pub notifications: Option<Value>,
     pub logs: Option<String>,
     pub ssh: Option<Value>,
     pub stats: Option<Value>,
@@ -352,6 +356,8 @@ impl App {
             settings: None,
             tuning: None,
             nut: None,
+            firewall: None,
+            notifications: None,
             logs: None,
             ssh: None,
             stats: None,
@@ -481,6 +487,62 @@ impl App {
             }
         }
 
+        if let Some(fw) = &self.firewall {
+            rows.push(SystemRow {
+                label: "── firewall ──".into(),
+                value: String::new(),
+                kind: SystemRowKind::Info,
+            });
+            let active = fw.get("active").and_then(|v| v.as_bool()).unwrap_or(false);
+            rows.push(SystemRow {
+                label: "status".into(),
+                value: if active {
+                    "active".into()
+                } else {
+                    "inactive".into()
+                },
+                kind: SystemRowKind::Info,
+            });
+            let n_rules = fw
+                .get("rules")
+                .and_then(|v| v.as_array())
+                .map(Vec::len)
+                .unwrap_or(0);
+            rows.push(SystemRow {
+                label: "open rules".into(),
+                value: n_rules.to_string(),
+                kind: SystemRowKind::Info,
+            });
+        }
+
+        if let Some(n) = &self.notifications {
+            rows.push(SystemRow {
+                label: "── notifications ──".into(),
+                value: String::new(),
+                kind: SystemRowKind::Info,
+            });
+            let chans = n
+                .get("channels")
+                .and_then(|v| v.as_array())
+                .cloned()
+                .unwrap_or_default();
+            if chans.is_empty() {
+                rows.push(SystemRow {
+                    label: "channels".into(),
+                    value: "none configured (use the API)".into(),
+                    kind: SystemRowKind::Info,
+                });
+            }
+            for ch in &chans {
+                let id = ch.get("id").and_then(|v| v.as_str()).unwrap_or("channel");
+                rows.push(SystemRow {
+                    label: format!("channel · {id}"),
+                    value: dval(ch, "type"),
+                    kind: SystemRowKind::TestChannel(id.to_string()),
+                });
+            }
+        }
+
         rows.push(SystemRow {
             label: "── access ──".into(),
             value: String::new(),
@@ -597,6 +659,8 @@ pub(super) enum SystemRowKind {
     },
     /// An authorized SSH key (deletable).
     SshKey(String),
+    /// A notification channel — Enter sends a test.
+    TestChannel(String),
     /// Display-only (section headers, read-only values).
     Info,
 }
@@ -1520,6 +1584,17 @@ async fn edit_system_row(app: &mut App, write: &mut WsWrite) {
                 .send(client::request(ID_ACTION, method, json!({ key: !current })))
                 .await;
         }
+        SystemRowKind::TestChannel(id) => {
+            let id = id.clone();
+            app.status = format!("testing {id}…");
+            let _ = write
+                .send(client::request(
+                    ID_ACTION,
+                    "notifications.test_saved",
+                    json!({"id": id}),
+                ))
+                .await;
+        }
         SystemRowKind::SshKey(_) | SystemRowKind::Info => {}
     }
 }
@@ -2386,6 +2461,8 @@ async fn store_response(app: &mut App, id: i64, val: Value, write: &mut WsWrite)
         ID_SETTINGS => app.settings = Some(val),
         ID_TUNING => app.tuning = Some(val),
         ID_NUT => app.nut = Some(val),
+        ID_FIREWALL => app.firewall = Some(val),
+        ID_NOTIFICATIONS => app.notifications = Some(val),
         ID_LOGS => app.logs = Some(val.as_str().unwrap_or_default().to_string()),
         ID_FILES => app.files = as_array(val),
         ID_SSH => app.ssh = Some(val),
@@ -2500,6 +2577,8 @@ async fn refresh_all(app: &mut App, write: &mut WsWrite) {
         (ID_SETTINGS, "system.settings.get"),
         (ID_TUNING, "system.tuning.get"),
         (ID_NUT, "system.nut.config.get"),
+        (ID_FIREWALL, "system.firewall.status"),
+        (ID_NOTIFICATIONS, "notifications.config.get"),
         (ID_SSH, "system.ssh.status"),
         (ID_STATS, "system.stats"),
         (ID_ALERTS, "system.alerts"),

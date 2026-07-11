@@ -1186,6 +1186,7 @@ fn render_system(f: &mut Frame, area: Rect, app: &App) {
                 SystemRowKind::Edit { .. } => "edit",
                 SystemRowKind::Toggle { .. } => "toggle",
                 SystemRowKind::SshKey(_) => "ssh",
+                SystemRowKind::TestChannel(_) => "test",
                 SystemRowKind::Info => "info",
             };
             Row::new(vec![
