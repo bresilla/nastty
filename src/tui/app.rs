@@ -235,6 +235,21 @@ enum FormKind {
         id: String,
         existing: Vec<String>,
     },
+    SubvolClone {
+        filesystem: String,
+        name: String,
+    },
+    SubvolUpdate {
+        filesystem: String,
+        name: String,
+    },
+    SubvolResize {
+        filesystem: String,
+        name: String,
+    },
+    DiskType {
+        path: String,
+    },
     EditField {
         method: &'static str,
         key: &'static str,
@@ -823,6 +838,9 @@ async fn handle_input(app: &mut App, ev: Event, write: &mut WsWrite) {
         KeyCode::Up | KeyCode::Char('k') => {
             app.selected = app.selected.saturating_sub(1);
         }
+        KeyCode::Char('r') if app.tab == TAB_SUBVOLUMES => {
+            open_subvolume_form(app, SubvolAction::Resize)
+        }
         KeyCode::Char('r') => {
             app.status = "refreshing…".to_string();
             refresh_all(app, write).await;
@@ -851,7 +869,14 @@ async fn handle_input(app: &mut App, ev: Event, write: &mut WsWrite) {
         KeyCode::Char('e') if app.tab == TAB_SYSTEM => edit_system_row(app, write).await,
         KeyCode::Char('L') if app.tab == TAB_SYSTEM => open_logs(app, write).await,
         KeyCode::Char('c') if app.tab == TAB_SNAPSHOTS => open_clone_snapshot_form(app),
+        KeyCode::Char('c') if app.tab == TAB_SUBVOLUMES => {
+            open_subvolume_form(app, SubvolAction::Clone)
+        }
+        KeyCode::Char('e') if app.tab == TAB_SUBVOLUMES => {
+            open_subvolume_form(app, SubvolAction::Edit)
+        }
         KeyCode::Char('w') if app.tab == TAB_DEVICES => open_wipe_confirm(app),
+        KeyCode::Char('t') if app.tab == TAB_DEVICES => open_disktype_form(app),
         KeyCode::Char('R') if app.tab == TAB_FILES => open_rename_form(app),
         KeyCode::Char('p') if app.tab == TAB_USERS => open_password_form(app),
         KeyCode::Char('g') if app.tab == TAB_USERS => open_group_member_form(app, true),
@@ -1162,6 +1187,78 @@ fn open_create_form(app: &mut App) {
         _ => return,
     };
     app.modal = Modal::Form(form);
+}
+
+enum SubvolAction {
+    Clone,
+    Edit,
+    Resize,
+}
+
+fn open_subvolume_form(app: &mut App, action: SubvolAction) {
+    let Some(sub) = app.subvolumes.get(app.selected) else {
+        return;
+    };
+    let fs = str_of(sub, "filesystem");
+    let name = str_of(sub, "name");
+    let form = match action {
+        SubvolAction::Clone => Form {
+            title: format!("clone {name}"),
+            hint: "writable copy (works on btrfs + bcachefs)".into(),
+            fields: vec![FormField::text("new name", "")],
+            focus: 0,
+            kind: FormKind::SubvolClone {
+                filesystem: fs,
+                name,
+            },
+        },
+        SubvolAction::Edit => Form {
+            title: format!("edit {name}"),
+            hint: "bcachefs only — btrfs returns not-supported".into(),
+            fields: vec![
+                FormField::select(
+                    "compression",
+                    vec!["none".into(), "zstd".into(), "lz4".into(), "gzip".into()],
+                    0,
+                ),
+                FormField::text("comments", &str_of(sub, "comments")),
+            ],
+            focus: 0,
+            kind: FormKind::SubvolUpdate {
+                filesystem: fs,
+                name,
+            },
+        },
+        SubvolAction::Resize => Form {
+            title: format!("resize {name}"),
+            hint: "block subvolume quota in GiB (bcachefs)".into(),
+            fields: vec![FormField::text("size GiB", "10")],
+            focus: 0,
+            kind: FormKind::SubvolResize {
+                filesystem: fs,
+                name,
+            },
+        },
+    };
+    app.modal = Modal::Form(form);
+}
+
+fn open_disktype_form(app: &mut App) {
+    let Some(dev) = app.devices.get(app.selected) else {
+        return;
+    };
+    let path = str_of(dev, "path");
+    app.modal = Modal::Form(Form {
+        title: format!("disk type · {path}"),
+        hint: "override the auto-detected SSD/HDD/NVMe classification".into(),
+        fields: vec![FormField::select(
+            "device_class",
+            vec!["auto".into(), "ssd".into(), "hdd".into(), "nvme".into()],
+            0,
+        )],
+        focus: 0,
+        kind: FormKind::DiskType { path },
+    });
 }
 
 fn open_snapshot_form_for_selected(app: &mut App) {
@@ -2634,6 +2731,42 @@ fn build_request(form: &mut Form) -> Result<(&'static str, Value), String> {
             }
             Ok(("share.smb.update", json!({"id": id, "valid_users": users})))
         }
+        FormKind::SubvolClone { filesystem, name } => {
+            require(&get(0), "new name")?;
+            Ok((
+                "subvolume.clone",
+                json!({"filesystem": filesystem, "name": name, "new_name": get(0)}),
+            ))
+        }
+        FormKind::SubvolUpdate { filesystem, name } => {
+            let compression = match get(0).as_str() {
+                "none" | "" => Value::Null,
+                c => json!(c),
+            };
+            Ok((
+                "subvolume.update",
+                json!({
+                    "filesystem": filesystem,
+                    "name": name,
+                    "compression": compression,
+                    "comments": if get(1).is_empty() { Value::Null } else { json!(get(1)) },
+                }),
+            ))
+        }
+        FormKind::SubvolResize { filesystem, name } => {
+            let gib: f64 = get(0)
+                .parse()
+                .map_err(|_| "size must be a number".to_string())?;
+            let bytes = (gib * 1024.0 * 1024.0 * 1024.0) as u64;
+            Ok((
+                "subvolume.resize",
+                json!({"filesystem": filesystem, "name": name, "volsize_bytes": bytes}),
+            ))
+        }
+        FormKind::DiskType { path } => Ok((
+            "device.set_type",
+            json!({"path": path, "device_class": get(0)}),
+        )),
     }
 }
 

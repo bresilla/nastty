@@ -177,18 +177,37 @@ fn render_reveal(f: &mut Frame, area: Rect, reveal: &super::app::Reveal) {
 // ── header ──────────────────────────────────────────────────────
 
 fn render_tabs(f: &mut Frame, area: Rect, app: &App) {
-    // Each tab is padded inside so the selection pill has air around the
-    // icon and label: " ⌂ Overview ".
+    // 11 tabs would overflow a narrow terminal if every one showed its
+    // label. So: the active tab shows " icon Label " (padded pill), the
+    // rest show just their icon. Number keys 1-9/0 still jump directly.
+    // Full width = every tab's " icon Label " + dividers + the brand/status
+    // on the border. Go compact when that would overflow.
+    let full_w: u16 = TABS
+        .iter()
+        .map(|t| t.len() as u16 + 5) // " icon Label " + divider
+        .sum::<u16>()
+        + 24;
+    let compact = area.width < full_w;
+
     let titles: Vec<Line> = TABS
         .iter()
         .zip(TAB_ICONS)
-        .map(|(name, icon)| {
-            Line::from(vec![
-                Span::raw(" "),
-                Span::styled(format!("{icon} "), Style::default().fg(theme::ACCENT)),
-                Span::styled(*name, theme::subtle()),
-                Span::raw(" "),
-            ])
+        .enumerate()
+        .map(|(i, (name, icon))| {
+            if compact && i != app.tab {
+                Line::from(vec![
+                    Span::raw(" "),
+                    Span::styled(icon, Style::default().fg(theme::ACCENT)),
+                    Span::raw(" "),
+                ])
+            } else {
+                Line::from(vec![
+                    Span::raw(" "),
+                    Span::styled(format!("{icon} "), Style::default().fg(theme::ACCENT)),
+                    Span::styled(*name, theme::subtle()),
+                    Span::raw(" "),
+                ])
+            }
         })
         .collect();
 
@@ -655,7 +674,10 @@ fn render_devices(f: &mut Frame, area: Rect, app: &App) {
     render_table(
         f,
         area,
-        &format!("devices ({}) — w wipe", app.devices.len()),
+        &format!(
+            "devices ({}) — ↵ members · w wipe · t type",
+            app.devices.len()
+        ),
         &["device", "class", "size", "health", "state"],
         &[
             Constraint::Min(26),
@@ -746,7 +768,10 @@ fn render_subvolumes(f: &mut Frame, area: Rect, app: &App) {
     render_table(
         f,
         area,
-        &format!("subvolumes ({})", app.subvolumes.len()),
+        &format!(
+            "subvolumes ({}) — n new · c clone · e edit · r resize · s snap · d del",
+            app.subvolumes.len()
+        ),
         &["subvolume", "type", "used"],
         &[
             Constraint::Min(30),
