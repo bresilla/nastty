@@ -1,6 +1,7 @@
 //! RPC arms in the `snapshot.*` domain. Ported from the upstream engine's
-//! `router/snapshot.rs`; the engine-orchestrated `snapshot.rollback` is
-//! deferred (it quiesces apps/VMs, which this server doesn't manage).
+//! `router/snapshot.rs`. Rollback deliberately uses the storage primitive
+//! directly: nastty has no app/VM lifecycle to quiesce, while the primitive
+//! still creates a safety snapshot before swapping the live subvolume.
 
 use nasty_common::{Request, Response};
 
@@ -56,6 +57,25 @@ pub(super) async fn try_route(
             },
             Err(e) => invalid(req, e),
         },
+        "snapshot.rollback" => {
+            match parse_params::<nasty_storage::subvolume::RollbackSnapshotRequest>(req) {
+                Ok(p) => {
+                    if session
+                        .filesystem
+                        .as_deref()
+                        .is_some_and(|f| f != p.filesystem)
+                    {
+                        err(req, "access denied")
+                    } else {
+                        match state.subvolumes.rollback(p, session.owner.as_deref()).await {
+                            Ok(v) => ok(req, v),
+                            Err(e) => err(req, e),
+                        }
+                    }
+                }
+                Err(e) => invalid(req, e),
+            }
+        }
         _ => return None,
     })
 }

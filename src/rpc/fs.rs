@@ -99,6 +99,31 @@ pub(super) async fn try_route(
             }
             Err(e) => invalid(req, e),
         },
+        "fs.lock" => match require_str(req, "name") {
+            Ok(name) => match state.filesystems.lock(name).await {
+                Ok(fs) => ok(req, fs),
+                Err(e) => err(req, e),
+            },
+            Err(r) => r,
+        },
+        "fs.tpm.status" => match require_str(req, "name") {
+            Ok(name) => ok(req, state.filesystems.tpm_status(name).await),
+            Err(r) => r,
+        },
+        "fs.tpm.bind" => match require_str(req, "name") {
+            Ok(name) => match state.filesystems.tpm_bind(name).await {
+                Ok(v) => ok(req, v),
+                Err(e) => err(req, e),
+            },
+            Err(r) => r,
+        },
+        "fs.tpm.unbind" => match require_str(req, "name") {
+            Ok(name) => match state.filesystems.tpm_unbind(name).await {
+                Ok(v) => ok(req, v),
+                Err(e) => err(req, e),
+            },
+            Err(r) => r,
+        },
         "fs.key.export" => match require_str(req, "name") {
             Ok(name) => match state.filesystems.export_key(name).await {
                 Ok(key) => ok(req, key),
@@ -138,11 +163,47 @@ pub(super) async fn try_route(
             }
             Err(e) => invalid(req, e),
         },
-        "fs.options.update" => match parse_params(req) {
-            Ok(p) => match state.filesystems.update_options(p).await {
-                Ok(v) => ok(req, v),
-                Err(e) => err(req, e),
-            },
+        "fs.options.update" => match parse_params::<serde_json::Value>(req) {
+            Ok(mut raw) => {
+                let reconcile = raw
+                    .get("reconcile_enabled")
+                    .and_then(serde_json::Value::as_bool);
+                let copygc = raw
+                    .get("copygc_enabled")
+                    .and_then(serde_json::Value::as_bool);
+                let name = raw
+                    .get("name")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or("")
+                    .to_string();
+                if let Some(obj) = raw.as_object_mut() {
+                    obj.remove("reconcile_enabled");
+                    obj.remove("copygc_enabled");
+                }
+                match serde_json::from_value(raw) {
+                    Ok(p) => match state.filesystems.update_options(p).await {
+                        Ok(v) => {
+                            if let Some(enabled) = reconcile
+                                && let Err(e) = state
+                                    .filesystems
+                                    .set_reconcile_enabled(&name, enabled)
+                                    .await
+                            {
+                                return Some(err(req, e));
+                            }
+                            if let Some(enabled) = copygc
+                                && let Err(e) =
+                                    state.filesystems.set_copygc_enabled(&name, enabled).await
+                            {
+                                return Some(err(req, e));
+                            }
+                            ok(req, v)
+                        }
+                        Err(e) => err(req, e),
+                    },
+                    Err(e) => invalid(req, e),
+                }
+            }
             Err(e) => invalid(req, e),
         },
         "fs.device.add" => match parse_params(req) {
@@ -242,6 +303,59 @@ pub(super) async fn try_route(
                 Ok(v) => ok(req, v),
                 Err(e) => err(req, e),
             },
+            Err(r) => r,
+        },
+        "fs.reconcile.status" => match require_str(req, "name") {
+            Ok(name) => match state.filesystems.reconcile_status(name).await {
+                Ok(v) => ok(req, v),
+                Err(e) => err(req, e),
+            },
+            Err(r) => r,
+        },
+        "fs.reconcile.enable" | "fs.reconcile.disable" => match require_str(req, "name") {
+            Ok(name) => {
+                let enabled = req.method.ends_with(".enable");
+                match state.filesystems.set_reconcile_enabled(name, enabled).await {
+                    Ok(()) => ok(req, "ok"),
+                    Err(e) => err(req, e),
+                }
+            }
+            Err(r) => r,
+        },
+        "fs.copygc.status" => match require_str(req, "name") {
+            Ok(name) => match state.filesystems.copygc_status(name).await {
+                Ok(v) => ok(req, v),
+                Err(e) => err(req, e),
+            },
+            Err(r) => r,
+        },
+        "fs.copygc.enable" | "fs.copygc.disable" => match require_str(req, "name") {
+            Ok(name) => {
+                let enabled = req.method.ends_with(".enable");
+                match state.filesystems.set_copygc_enabled(name, enabled).await {
+                    Ok(()) => ok(req, "ok"),
+                    Err(e) => err(req, e),
+                }
+            }
+            Err(r) => r,
+        },
+        "fs.moving_ctxts" => match require_str(req, "name") {
+            Ok(name) => {
+                let contexts: Vec<_> = state
+                    .filesystems
+                    .moving_ctxts(name)
+                    .await
+                    .into_iter()
+                    .map(|ctx| {
+                        serde_json::json!({
+                            "kind": ctx.kind,
+                            "bytes_seen": ctx.bytes_seen,
+                            "bytes_moved": ctx.bytes_moved,
+                        })
+                    })
+                    .collect();
+                ok(req, contexts)
+            }
             Err(r) => r,
         },
         "fs.scrub.start" => match require_str(req, "name") {

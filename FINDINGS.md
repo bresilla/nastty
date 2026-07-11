@@ -681,6 +681,12 @@ SMB share create checks:
 
 ## Metrics
 
+> **Local nastty note:** the upstream architecture below used a separate
+> process when this scan was written. This repository now embeds collection,
+> history, RPC responses, and Prometheus output directly in `nasttyd` on port
+> 2137. Running a second metrics daemon is neither required nor supported by
+> the local two-binary design.
+
 The metrics daemon is separate:
 
 ```text

@@ -9,6 +9,7 @@ endif
 TOP_DIR := $(CURDIR)
 CARGO := cargo
 EXAMPLE ?= main
+SERVE_ARGS ?=
 PREFIX ?= $(HOME)/.local
 
 HAS_REL := $(shell command -v git-rel 2>/dev/null)
@@ -17,7 +18,7 @@ $(info ------------------------------------------)
 $(info Project: $(PROJECT_NAME) v$(PROJECT_VERSION))
 $(info ------------------------------------------)
 
-.PHONY: build b compile c run r serve tui test t check check-all test-all clippy rustdoc fmt fmt-check clean verify release help h
+.PHONY: build b compile c run r serve tui tui-preview test t check check-all test-all clippy rustdoc fmt fmt-check clean verify release help h
 
 build:
 	@$(CARGO) build --lib
@@ -36,14 +37,13 @@ run:
 r: run
 
 serve:
-	@$(CARGO) run --bin nasttyd
+	@$(CARGO) run --bin nasttyd -- $(SERVE_ARGS)
 
 tui:
 	@$(CARGO) run --bin nastty
 
-
-metrics:
-	@cd ../nasty/engine && $(CARGO) run -p nasty-metrics
+tui-preview:
+	@$(CARGO) test --lib preview -- --ignored --nocapture
 
 test:
 	@$(CARGO) test --all-targets
@@ -97,6 +97,7 @@ help:
 	@echo "  run          Run a development example"
 	@echo "  serve        Run the nasttyd API daemon"
 	@echo "  tui          Run the nastty terminal UI"
+	@echo "  tui-preview  Render development snapshots for every TUI workspace"
 	@echo "  test         Run all tests"
 	@echo "  check        Run cargo check on all targets"
 	@echo "  check-all    Run cargo check on all targets/all features"
@@ -111,4 +112,3 @@ help:
 	@echo
 
 h: help
-

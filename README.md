@@ -13,6 +13,8 @@ fork). This repo owns two thin pieces:
   - username/password sessions (cookie + bearer token)
   - JSON-RPC 2.0 over WebSocket at `/ws`, with change events pushed to clients
   - REST gateway: `/api/v1/<domain>/<method>` → `<domain>.<method>`
+  - built-in CPU, memory, network, and disk-I/O metrics collection, including
+    Prometheus output at `/metrics` and in-process history
   - upstream-compatible method names (`fs.list`, `device.list`,
     `share.nfs.create`, `service.protocol.enable`, ...)
 - **`nastty`** — a [ratatui](https://ratatui.rs) terminal client that logs in,
@@ -29,7 +31,8 @@ management.
 # file sharing daemons (NFS + SMB)
 sudo apt install -y nfs-kernel-server samba
 
-# one-time state directories (paths are fixed inside the nasty crates)
+# only needed before running nasttyd as an unprivileged user; a root-run
+# nasttyd creates these automatically
 sudo mkdir -p /var/lib/nasty /fs
 sudo chown $USER /var/lib/nasty        # only if running nasttyd unprivileged
 ```
@@ -73,6 +76,7 @@ service the way a blind `systemctl start` storm would.
 
 ```sh
 curl http://127.0.0.1:2137/health
+curl http://127.0.0.1:2137/metrics
 
 TOK=$(curl -s -X POST http://127.0.0.1:2137/api/login \
   -H 'content-type: application/json' \
@@ -104,6 +108,10 @@ connected socket, so clients refresh only the affected collection:
 Collections: `filesystem`, `subvolume`, `snapshot`, `share.nfs`,
 `share.smb`, `share.iscsi`, `share.nvmeof`, `protocol`.
 
+Metrics are collected inside `nasttyd`; there is no additional metrics daemon
+to install or run. The TUI's live dashboard and the `/metrics` endpoint use the
+same in-process sampler.
+
 ## Terminal UI
 
 With `nasttyd` running, start the TUI:
@@ -115,19 +123,48 @@ nastty --server http://127.0.0.1:2137 --user admin
 ```
 
 It shows a login screen (and a forced password-change screen on first run),
-then a tabbed live view:
+then an interactive workspace organized into five primary sections. On wide
+terminals, the current section's views live in a clickable sidebar; compact
+terminals keep the same section navigation without sacrificing the workspace.
+Selections expose contextual actions instead of acting as read-only dashboard
+rows, and `Space` opens their details in an on-demand inspector drawer:
 
 - **Overview** — host, kernel, uptime, engine/bcachefs versions
 - **Devices** — block devices (`device.list`)
 - **Filesystems** — bcachefs filesystems and mount state
 - **Subvolumes** — all subvolumes across filesystems
+- **Snapshots** — create, clone, and remove snapshots
 - **Shares** — NFS and SMB shares
+- **Files** — browse and manage the mounted filesystem tree
 - **Protocols** — enable/disable NFS/SMB/iSCSI/NVMe-oF/SSH/mDNS/... with Enter
+- **Users** — accounts, SMB identities, groups, and API tokens
+- **Alerts** — active alerts and configurable alert rules
+- **System** — host settings, SSH keys, and system logs
 
-Keys: `1`–`6` jump to a tab, `←`/`→` cycle tabs, `↑`/`↓` (or `j`/`k`) move the
-selection, `Enter` toggles the selected protocol, `r` refreshes, `q` quits. The
-view refreshes itself when the server pushes an event, so changes made from
-another client show up live.
+Keys: `←`/`→` or `h`/`l` move between the five sections, while
+`Tab`/`Shift-Tab` move between the views in the selected section (`[`/`]` are
+aliases). `↑`/`↓` or `j`/`k` move the row selection.
+`1`–`9`/`0` still jump directly to a view. Press `Space` for the inspector,
+`/` or `:` for the searchable command palette, and `?` for the current view's
+complete contextual help. The mouse can click section tabs, sidebar views, and
+rows or scroll the selection. Forms, confirmations, logs, filesystem status,
+resource details, and one-time secrets open as focused windows over the
+workspace. Server events refresh the affected collection live.
+
+`Enter` is the primary control action: on a device it opens a device control
+center with identity, capacity, SMART data, class management, wipe safety, and
+refresh actions. On a protocol/service it opens installation detection,
+persistent and runtime state, systemd units, configuration paths, available
+tuning areas, enable/disable, and a jump to the related management workspace.
+Direct expert shortcuts such as `w`, `t`, and `e` remain available.
+
+The UI runs on Ratatui 0.30 and uses widgets selected from the curated
+[`awesome-ratatui`](https://github.com/ratatui/awesome-ratatui) list:
+
+- [`tui-tabs`](https://crates.io/crates/tui-tabs) for the five responsive section tabs
+- [`tui-overlay`](https://crates.io/crates/tui-overlay) for the on-demand inspector drawer
+- [`tui-popup`](https://github.com/joshka/tui-popup) for the command palette
+- [`ratatui-cheese`](https://crates.io/crates/ratatui-cheese) for live spinners and table paginators
 
 ## Updating to latest upstream
 

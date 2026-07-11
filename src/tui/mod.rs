@@ -10,7 +10,7 @@ use std::io::{Stdout, stdout};
 
 use ratatui::Terminal;
 use ratatui::backend::CrosstermBackend;
-use ratatui::crossterm::event::{self, Event};
+use ratatui::crossterm::event::{self, DisableMouseCapture, EnableMouseCapture, Event};
 use ratatui::crossterm::execute;
 use ratatui::crossterm::terminal::{
     EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode,
@@ -49,13 +49,13 @@ async fn drive(
 fn setup_terminal() -> Result<Term, Box<dyn std::error::Error>> {
     enable_raw_mode()?;
     let mut out = stdout();
-    execute!(out, EnterAlternateScreen)?;
+    execute!(out, EnterAlternateScreen, EnableMouseCapture)?;
     // Restore the terminal even if the app panics, so the user isn't left
     // in raw mode with a garbled screen.
     let default_hook = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |info| {
         let _ = disable_raw_mode();
-        let _ = execute!(stdout(), LeaveAlternateScreen);
+        let _ = execute!(stdout(), DisableMouseCapture, LeaveAlternateScreen);
         default_hook(info);
     }));
     Ok(Terminal::new(CrosstermBackend::new(out))?)
@@ -63,7 +63,11 @@ fn setup_terminal() -> Result<Term, Box<dyn std::error::Error>> {
 
 fn restore_terminal(terminal: &mut Term) -> Result<(), Box<dyn std::error::Error>> {
     disable_raw_mode()?;
-    execute!(terminal.backend_mut(), LeaveAlternateScreen)?;
+    execute!(
+        terminal.backend_mut(),
+        DisableMouseCapture,
+        LeaveAlternateScreen
+    )?;
     terminal.show_cursor()?;
     Ok(())
 }

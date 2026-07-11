@@ -86,18 +86,24 @@ fn doctor(allow_missing_deps: bool) -> Result<(), String> {
     if !have("smbd") {
         warn!("samba NOT installed — SMB shares unavailable (sudo apt install samba)");
     }
-    if !std::path::Path::new("/var/lib/nasty").is_dir() {
-        warn!(
-            "/var/lib/nasty does not exist — users, protocol state, and share configs will NOT \
-             persist across restarts (sudo mkdir -p /var/lib/nasty && sudo chown $USER /var/lib/nasty)"
-        );
-    }
-    if !std::path::Path::new("/fs").is_dir() {
-        warn!(
-            "/fs does not exist — filesystem mounts and share paths live there (sudo mkdir -p /fs)"
-        );
-    }
+    ensure_directory(
+        "/var/lib/nasty",
+        "persistent users, protocol state, and share configuration",
+    );
+    ensure_directory("/fs", "filesystem mounts and share paths");
     Ok(())
+}
+
+fn ensure_directory(path: &str, purpose: &str) {
+    if std::path::Path::new(path).is_dir() {
+        return;
+    }
+    match std::fs::create_dir_all(path) {
+        Ok(()) => info!("created {path} for {purpose}"),
+        Err(error) => warn!(
+            "cannot create {path} for {purpose}: {error}. Start nasttyd as root, or run: sudo install -d -m 0755 -o \"$(id -un)\" {path}"
+        ),
+    }
 }
 
 async fn restore(state: Arc<AppState>) {
@@ -115,6 +121,9 @@ async fn restore(state: Arc<AppState>) {
     // even for services that are already up. Only touch protocols that are
     // enabled but NOT running (the running check is read-only, no auth).
     for p in state.protocols.list().await {
+        if p.name == "rest-server" {
+            continue;
+        }
         if p.enabled && !p.running {
             info!("restoring protocol {} (enabled but not running)", p.name);
             match state.protocols.enable(&p.name).await {

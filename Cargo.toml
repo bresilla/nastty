@@ -37,8 +37,12 @@ futures-util = "0.3"
 uuid = { version = "1", features = ["v4"] }
 
 # TUI client (nastty binary)
-ratatui = "0.29"
-tui-big-text = "0.7"
+ratatui = "0.30"
+tui-big-text = "0.8.8"
+tui-popup = "0.7.6"
+tui-overlay = "0.1.2"
+tui-tabs = "0.1.1"
+ratatui-cheese = "0.7.0"
 tokio-tungstenite = "0.26"
 reqwest = { version = "0.13", default-features = false, features = ["json", "rustls"] }
 

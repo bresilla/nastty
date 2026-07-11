@@ -13,6 +13,7 @@ pub const MUTED: Color = Color::Rgb(0x6c, 0x70, 0x86);
 pub const SURFACE: Color = Color::Rgb(0x31, 0x32, 0x44);
 pub const SURFACE_LO: Color = Color::Rgb(0x24, 0x25, 0x34);
 
+pub const COLOR0: Color = Color::Indexed(0);
 pub const ACCENT: Color = Color::Indexed(1);
 pub const MAUVE: Color = Color::Indexed(5);
 pub const GREEN: Color = Color::Rgb(0xa6, 0xe3, 0xa1);

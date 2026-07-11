@@ -29,6 +29,21 @@ pub(super) const TABS: [&str; 11] = [
     "Alerts",
     "System",
 ];
+pub(super) const TAB_ICONS: [&str; 11] = ["⌂", "⛁", "▤", "▦", "◷", "⇄", "🗀", "☰", "◉", "◍", "⚙"];
+pub(super) const GROUPS: [&str; 5] = ["Dashboard", "Storage", "Access", "Identity", "Operations"];
+pub(super) const GROUPS_COMPACT: [&str; 5] = ["Dash", "Store", "Access", "ID", "Ops"];
+const GROUP_VIEWS: [&[usize]; 5] = [&[0], &[1, 2, 3, 4], &[5, 6, 7], &[8], &[9, 10]];
+
+pub(super) fn group_for_tab(tab: usize) -> usize {
+    GROUP_VIEWS
+        .iter()
+        .position(|views| views.contains(&tab))
+        .unwrap_or(0)
+}
+
+pub(super) fn group_views(group: usize) -> &'static [usize] {
+    GROUP_VIEWS.get(group).copied().unwrap_or(GROUP_VIEWS[0])
+}
 const TAB_DEVICES: usize = 1;
 const TAB_FILESYSTEMS: usize = 2;
 const TAB_SUBVOLUMES: usize = 3;
@@ -68,12 +83,17 @@ const ID_NOTIFICATIONS: i64 = 21;
 const ID_DISKS: i64 = 22;
 const ID_FS_USAGE: i64 = 23;
 const ID_FS_SCRUB: i64 = 24;
+const ID_FS_FSCK: i64 = 25;
+const ID_FS_RECONCILE: i64 = 26;
+const ID_FS_COPYGC: i64 = 27;
+const ID_FS_RAW: i64 = 28;
 const ID_TOKEN_CREATE: i64 = 201;
 const ID_STATS: i64 = 102;
 const ID_ALERTS: i64 = 103;
 const ID_ACTION: i64 = 200;
 /// Per-filesystem snapshot queries get ID_SNAP_BASE + index.
 const ID_SNAP_BASE: i64 = 300;
+const ID_FS_STRIP_BASE: i64 = 4_000;
 
 // ── modal framework ─────────────────────────────────────────────
 
@@ -191,6 +211,9 @@ enum FormKind {
     },
     CreateShare,
     CreateFs,
+    EditFs {
+        name: String,
+    },
     CreateSubvolume,
     CreateSnapshot,
     CloneSnapshot {
@@ -314,6 +337,73 @@ pub(super) struct FsStatus {
     pub name: String,
 }
 
+pub(super) struct CommandPalette {
+    pub query: String,
+    pub selected: usize,
+}
+
+pub(super) struct ContextMenu {
+    pub title: String,
+    pub subtitle: String,
+    pub details: Vec<(String, String)>,
+    pub items: Vec<ContextMenuItem>,
+    pub selected: usize,
+}
+
+pub(super) struct ContextMenuItem {
+    pub label: String,
+    pub hint: String,
+    pub enabled: bool,
+    action: Option<ContextAction>,
+}
+
+#[derive(Clone)]
+enum ContextAction {
+    DeviceType,
+    DeviceWipe,
+    Refresh,
+    ProtocolToggle { name: String, enable: bool },
+    GoTo { tab: usize, selected: usize },
+    OpenInspector,
+    Close,
+}
+
+#[derive(Clone, Copy)]
+pub(super) enum PaletteAction {
+    GoTo(usize),
+    Create,
+    Refresh,
+    Help,
+    Quit,
+}
+
+impl PaletteAction {
+    pub(super) fn label(self) -> String {
+        match self {
+            Self::GoTo(tab) => format!("go to {}", TABS[tab]),
+            Self::Create => "create new item in current workspace".into(),
+            Self::Refresh => "refresh all server data".into(),
+            Self::Help => "open keyboard help".into(),
+            Self::Quit => "quit nastty".into(),
+        }
+    }
+}
+
+pub(super) fn palette_actions(query: &str) -> Vec<PaletteAction> {
+    let mut actions: Vec<_> = (0..TABS.len()).map(PaletteAction::GoTo).collect();
+    actions.extend([
+        PaletteAction::Create,
+        PaletteAction::Refresh,
+        PaletteAction::Help,
+        PaletteAction::Quit,
+    ]);
+    let query = query.trim().to_lowercase();
+    if !query.is_empty() {
+        actions.retain(|action| action.label().to_lowercase().contains(&query));
+    }
+    actions
+}
+
 pub(super) enum Modal {
     None,
     Form(Form),
@@ -322,6 +412,8 @@ pub(super) enum Modal {
     Detail(Detail),
     Logs(Logs),
     FsStatus(FsStatus),
+    CommandPalette(CommandPalette),
+    ContextMenu(ContextMenu),
 }
 
 pub(super) struct App {
@@ -366,9 +458,16 @@ pub(super) struct App {
     /// Live usage/scrub for the filesystem shown in the FsStatus modal.
     pub fs_usage: Option<Value>,
     pub fs_scrub: Option<Value>,
+    pub fs_fsck: Option<Value>,
+    pub fs_reconcile: Option<Value>,
+    pub fs_copygc: Option<Value>,
+    pub fs_raw: Option<String>,
+    pub fs_strip: HashMap<String, [Option<Value>; 4]>,
     pub status: String,
     pub show_help: bool,
     pub modal: Modal,
+    pub viewport_width: u16,
+    pub inspector_open: bool,
     /// In-flight snapshot.list request id → filesystem name.
     pending_snapshots: HashMap<i64, String>,
     should_quit: bool,
@@ -413,9 +512,16 @@ impl App {
             disks: Vec::new(),
             fs_usage: None,
             fs_scrub: None,
+            fs_fsck: None,
+            fs_reconcile: None,
+            fs_copygc: None,
+            fs_raw: None,
+            fs_strip: HashMap::new(),
             status: "loading…".to_string(),
             show_help: false,
             modal: Modal::None,
+            viewport_width: 0,
+            inspector_open: false,
             pending_snapshots: HashMap::new(),
             should_quit: false,
         }
@@ -728,6 +834,7 @@ pub(super) async fn run_app(
     tick.tick().await; // consume the immediate first tick
 
     loop {
+        app.viewport_width = terminal.size()?.width;
         terminal.draw(|f| super::ui::render_app(f, &app))?;
         if app.should_quit {
             break;
@@ -764,6 +871,10 @@ pub(super) async fn run_app(
 }
 
 async fn handle_input(app: &mut App, ev: Event, write: &mut WsWrite) {
+    if let Event::Mouse(mouse) = ev {
+        handle_mouse(app, mouse, write).await;
+        return;
+    }
     let Event::Key(key) = ev else { return };
     if key.kind != KeyEventKind::Press {
         return;
@@ -796,11 +907,27 @@ async fn handle_input(app: &mut App, ev: Event, write: &mut WsWrite) {
             handle_fs_status_key(app, key.code, write).await;
             return;
         }
+        Modal::CommandPalette(_) => {
+            handle_command_palette_key(app, key.code, write).await;
+            return;
+        }
+        Modal::ContextMenu(_) => {
+            handle_context_menu_key(app, key.code, write).await;
+            return;
+        }
         Modal::None => {}
     }
 
     if key.code == KeyCode::Char('?') {
         app.show_help = !app.show_help;
+        return;
+    }
+
+    if matches!(key.code, KeyCode::Char('/') | KeyCode::Char(':')) {
+        app.modal = Modal::CommandPalette(CommandPalette {
+            query: String::new(),
+            selected: 0,
+        });
         return;
     }
 
@@ -821,16 +948,33 @@ async fn handle_input(app: &mut App, ev: Event, write: &mut WsWrite) {
         KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
             app.should_quit = true
         }
-        KeyCode::Tab | KeyCode::Right | KeyCode::Char('l') => {
-            app.tab = (app.tab + 1) % TABS.len();
+        KeyCode::Right | KeyCode::Char('l') => {
+            let group = (group_for_tab(app.tab) + 1) % GROUPS.len();
+            app.tab = group_views(group)[0];
             app.selected = 0;
             on_tab_enter(app, write).await;
         }
-        KeyCode::BackTab | KeyCode::Left | KeyCode::Char('h') => {
-            app.tab = (app.tab + TABS.len() - 1) % TABS.len();
+        KeyCode::Left | KeyCode::Char('h') => {
+            let group = (group_for_tab(app.tab) + GROUPS.len() - 1) % GROUPS.len();
+            app.tab = group_views(group)[0];
             app.selected = 0;
             on_tab_enter(app, write).await;
         }
+        KeyCode::Tab | KeyCode::Char(']') | KeyCode::Char('}') => {
+            let views = group_views(group_for_tab(app.tab));
+            let current = views.iter().position(|tab| *tab == app.tab).unwrap_or(0);
+            app.tab = views[(current + 1) % views.len()];
+            app.selected = 0;
+            on_tab_enter(app, write).await;
+        }
+        KeyCode::BackTab | KeyCode::Char('[') | KeyCode::Char('{') => {
+            let views = group_views(group_for_tab(app.tab));
+            let current = views.iter().position(|tab| *tab == app.tab).unwrap_or(0);
+            app.tab = views[(current + views.len() - 1) % views.len()];
+            app.selected = 0;
+            on_tab_enter(app, write).await;
+        }
+        KeyCode::Char(' ') => app.inspector_open = !app.inspector_open,
         KeyCode::Char(d @ '1'..='9') => {
             app.tab = (d as usize - '1' as usize).min(TABS.len() - 1);
             app.selected = 0;
@@ -858,7 +1002,8 @@ async fn handle_input(app: &mut App, ev: Event, write: &mut WsWrite) {
             refresh_all(app, write).await;
         }
         KeyCode::Enter => match app.tab {
-            TAB_PROTOCOLS => toggle_protocol(app, write).await,
+            TAB_DEVICES => open_device_menu(app),
+            TAB_PROTOCOLS => open_protocol_menu(app),
             TAB_ALERTS => toggle_alert_rule(app, write).await,
             TAB_SYSTEM => edit_system_row(app, write).await,
             TAB_FILESYSTEMS => open_fs_devices_detail(app),
@@ -878,7 +1023,9 @@ async fn handle_input(app: &mut App, ev: Event, write: &mut WsWrite) {
             _ => {}
         },
         KeyCode::Char('e') if app.tab == TAB_SHARES => toggle_share_enabled(app, write).await,
+        KeyCode::Char('e') if app.tab == TAB_FILESYSTEMS => open_edit_fs_form(app),
         KeyCode::Char('e') if app.tab == TAB_ALERTS => toggle_alert_rule(app, write).await,
+        KeyCode::Char('e') if app.tab == TAB_PROTOCOLS => toggle_protocol(app, write).await,
         KeyCode::Char('e') if app.tab == TAB_SYSTEM => edit_system_row(app, write).await,
         KeyCode::Char('L') if app.tab == TAB_SYSTEM => open_logs(app, write).await,
         KeyCode::Char('c') if app.tab == TAB_SNAPSHOTS => open_clone_snapshot_form(app),
@@ -898,6 +1045,477 @@ async fn handle_input(app: &mut App, ev: Event, write: &mut WsWrite) {
     }
 }
 
+fn menu_item(
+    label: impl Into<String>,
+    hint: impl Into<String>,
+    action: ContextAction,
+) -> ContextMenuItem {
+    ContextMenuItem {
+        label: label.into(),
+        hint: hint.into(),
+        enabled: true,
+        action: Some(action),
+    }
+}
+
+fn disabled_menu_item(label: impl Into<String>, hint: impl Into<String>) -> ContextMenuItem {
+    ContextMenuItem {
+        label: label.into(),
+        hint: hint.into(),
+        enabled: false,
+        action: None,
+    }
+}
+
+pub(super) fn open_device_menu(app: &mut App) {
+    let Some(device) = app.devices.get(app.selected) else {
+        return;
+    };
+    let path = scalar_of(device, "path");
+    let basename = path.rsplit('/').next().unwrap_or(&path);
+    let health = app.disks.iter().find(|disk| {
+        disk.get("device")
+            .and_then(|value| value.as_str())
+            .is_some_and(|device| device.rsplit('/').next() == Some(basename))
+    });
+    let in_use = device
+        .get("in_use")
+        .and_then(|value| value.as_bool())
+        .unwrap_or(false);
+    let mut details = vec![
+        ("path".into(), path.clone()),
+        ("model".into(), scalar_of(device, "model")),
+        ("serial".into(), scalar_of(device, "serial")),
+        ("class".into(), scalar_of(device, "device_class")),
+        ("type".into(), scalar_of(device, "dev_type")),
+        ("transport".into(), scalar_of(device, "transport")),
+        (
+            "capacity".into(),
+            device
+                .get("size_bytes")
+                .and_then(|value| value.as_u64())
+                .map(format_bytes)
+                .unwrap_or_else(|| "unknown".into()),
+        ),
+        (
+            "usage".into(),
+            if in_use { "in use" } else { "free" }.into(),
+        ),
+    ];
+    if let Some(health) = health {
+        details.extend([
+            ("SMART".into(), scalar_of(health, "smart_status")),
+            (
+                "temperature".into(),
+                health
+                    .get("temperature_c")
+                    .and_then(|value| value.as_i64())
+                    .map(|value| format!("{value}°C"))
+                    .unwrap_or_else(|| "unknown".into()),
+            ),
+            (
+                "power-on time".into(),
+                health
+                    .get("power_on_hours")
+                    .and_then(|value| value.as_u64())
+                    .map(|value| format!("{value} hours"))
+                    .unwrap_or_else(|| "unknown".into()),
+            ),
+        ]);
+    }
+    let mut items = vec![
+        menu_item(
+            "Open full inspector",
+            "show every field reported by the daemon",
+            ContextAction::OpenInspector,
+        ),
+        menu_item(
+            "Change storage class",
+            "set HDD, SSD, NVMe, or another allocation class",
+            ContextAction::DeviceType,
+        ),
+    ];
+    if in_use {
+        items.push(disabled_menu_item(
+            "Wipe device (unavailable)",
+            "remove it from its filesystem before wiping",
+        ));
+    } else {
+        items.push(menu_item(
+            "Wipe device",
+            "destructive: erase filesystem signatures after confirmation",
+            ContextAction::DeviceWipe,
+        ));
+    }
+    items.extend([
+        menu_item(
+            "Refresh device and SMART status",
+            "query the daemon again",
+            ContextAction::Refresh,
+        ),
+        menu_item("Close", "return to the device table", ContextAction::Close),
+    ]);
+    app.modal = Modal::ContextMenu(ContextMenu {
+        title: format!("Device controls · {path}"),
+        subtitle: "Details and safe actions for the selected physical device".into(),
+        details,
+        items,
+        selected: 0,
+    });
+}
+
+pub(super) fn open_protocol_menu(app: &mut App) {
+    let Some(protocol) = app.protocols.get(app.selected) else {
+        return;
+    };
+    let name = scalar_of(protocol, "name");
+    let display = scalar_of(protocol, "display_name");
+    let enabled = protocol
+        .get("enabled")
+        .and_then(|value| value.as_bool())
+        .unwrap_or(false);
+    let running = protocol
+        .get("running")
+        .and_then(|value| value.as_bool())
+        .unwrap_or(false);
+    let installed = protocol
+        .get("installed")
+        .and_then(|value| value.as_bool())
+        .unwrap_or(false);
+    let package = scalar_of(protocol, "package");
+    let units = protocol
+        .get("units")
+        .and_then(|value| value.as_array())
+        .map(|units| {
+            units
+                .iter()
+                .filter_map(|unit| unit.as_str())
+                .collect::<Vec<_>>()
+                .join(", ")
+        })
+        .filter(|units| !units.is_empty())
+        .unwrap_or_else(|| "kernel/configfs managed".into());
+    let details = vec![
+        ("service".into(), display.clone()),
+        ("description".into(), scalar_of(protocol, "description")),
+        (
+            "persistent state".into(),
+            if enabled { "enabled" } else { "disabled" }.into(),
+        ),
+        (
+            "runtime state".into(),
+            if running { "running" } else { "stopped" }.into(),
+        ),
+        (
+            "installation".into(),
+            if installed {
+                format!("installed ({package})")
+            } else {
+                format!("missing — sudo apt install {package}")
+            },
+        ),
+        ("systemd units".into(), units),
+        ("configuration".into(), scalar_of(protocol, "configuration")),
+        ("available controls".into(), scalar_of(protocol, "controls")),
+    ];
+    let related = match name.as_str() {
+        "nfs" => (TAB_SHARES, 0),
+        "smb" => (TAB_SHARES, app.nfs.len()),
+        "iscsi" => (TAB_SHARES, app.nfs.len() + app.smb.len()),
+        "nvmeof" => (TAB_SHARES, app.nfs.len() + app.smb.len() + app.iscsi.len()),
+        "smart" => (TAB_DEVICES, 0),
+        "ssh" => (
+            TAB_SYSTEM,
+            app.system_rows()
+                .iter()
+                .position(|row| row.label == "ssh password auth")
+                .unwrap_or(0),
+        ),
+        "nut" => (
+            TAB_SYSTEM,
+            app.system_rows()
+                .iter()
+                .position(|row| row.label == "mode")
+                .unwrap_or(0),
+        ),
+        _ => (TAB_SYSTEM, 0),
+    };
+    let mut items = vec![menu_item(
+        if enabled {
+            "Disable service"
+        } else {
+            "Enable service"
+        },
+        if enabled {
+            "stop the service and persist disabled state"
+        } else {
+            "prepare dependencies, start the service, and persist state"
+        },
+        ContextAction::ProtocolToggle {
+            name,
+            enable: !enabled,
+        },
+    )];
+    if installed {
+        items.push(disabled_menu_item(
+            format!("Installed · {package}"),
+            "the required command is available",
+        ));
+    } else {
+        items.push(disabled_menu_item(
+            format!("Missing package · {package}"),
+            format!("run: sudo apt install {package}, then refresh status"),
+        ));
+    }
+    items.extend([
+        menu_item(
+            "Open related controls",
+            "jump to shares, devices, identities, or system settings",
+            ContextAction::GoTo {
+                tab: related.0,
+                selected: related.1,
+            },
+        ),
+        menu_item(
+            "Open full inspector",
+            "show every service field reported by nasttyd",
+            ContextAction::OpenInspector,
+        ),
+        menu_item(
+            "Refresh installation and runtime status",
+            "query systemd and installed commands again",
+            ContextAction::Refresh,
+        ),
+        menu_item(
+            "Close",
+            "return to the protocol table",
+            ContextAction::Close,
+        ),
+    ]);
+    app.modal = Modal::ContextMenu(ContextMenu {
+        title: format!("Service controls · {display}"),
+        subtitle: "Installation, runtime state, configuration, and management actions".into(),
+        details,
+        items,
+        selected: 0,
+    });
+}
+
+async fn handle_context_menu_key(app: &mut App, code: KeyCode, write: &mut WsWrite) {
+    let Modal::ContextMenu(menu) = &mut app.modal else {
+        return;
+    };
+    match code {
+        KeyCode::Esc => {
+            app.modal = Modal::None;
+            return;
+        }
+        KeyCode::Down | KeyCode::Char('j') | KeyCode::Tab => {
+            if !menu.items.is_empty() {
+                menu.selected = (menu.selected + 1) % menu.items.len();
+            }
+            return;
+        }
+        KeyCode::Up | KeyCode::Char('k') | KeyCode::BackTab => {
+            if !menu.items.is_empty() {
+                menu.selected = (menu.selected + menu.items.len() - 1) % menu.items.len();
+            }
+            return;
+        }
+        _ => {}
+    }
+    let action = if code == KeyCode::Enter {
+        menu.items
+            .get(menu.selected)
+            .and_then(|item| item.action.clone())
+    } else if code == KeyCode::Char('r') {
+        Some(ContextAction::Refresh)
+    } else {
+        None
+    };
+    match action {
+        Some(ContextAction::DeviceType) => {
+            app.modal = Modal::None;
+            open_disktype_form(app);
+        }
+        Some(ContextAction::DeviceWipe) => {
+            app.modal = Modal::None;
+            open_wipe_confirm(app);
+        }
+        Some(ContextAction::Refresh) => {
+            app.modal = Modal::None;
+            app.status = "refreshing selected view…".into();
+            on_tab_enter(app, write).await;
+        }
+        Some(ContextAction::ProtocolToggle { name, enable }) => {
+            app.status = format!("{} {name}…", if enable { "enabling" } else { "disabling" });
+            let method = if enable {
+                "service.protocol.enable"
+            } else {
+                "service.protocol.disable"
+            };
+            let _ = write
+                .send(client::request(ID_ACTION, method, json!({ "name": name })))
+                .await;
+            app.modal = Modal::None;
+        }
+        Some(ContextAction::GoTo { tab, selected }) => {
+            app.modal = Modal::None;
+            app.tab = tab;
+            app.selected = selected;
+            on_tab_enter(app, write).await;
+        }
+        Some(ContextAction::OpenInspector) => {
+            app.modal = Modal::None;
+            app.inspector_open = true;
+        }
+        Some(ContextAction::Close) => app.modal = Modal::None,
+        None => {}
+    }
+}
+
+fn scalar_of(value: &Value, key: &str) -> String {
+    match value.get(key) {
+        Some(Value::String(value)) => value.clone(),
+        Some(Value::Bool(value)) => value.to_string(),
+        Some(Value::Number(value)) => value.to_string(),
+        _ => "unknown".into(),
+    }
+}
+
+fn format_bytes(bytes: u64) -> String {
+    const UNITS: [&str; 5] = ["B", "KiB", "MiB", "GiB", "TiB"];
+    let mut value = bytes as f64;
+    let mut unit = 0;
+    while value >= 1024.0 && unit < UNITS.len() - 1 {
+        value /= 1024.0;
+        unit += 1;
+    }
+    format!("{value:.1} {}", UNITS[unit])
+}
+
+async fn handle_mouse(
+    app: &mut App,
+    mouse: ratatui::crossterm::event::MouseEvent,
+    write: &mut WsWrite,
+) {
+    use ratatui::crossterm::event::{MouseButton, MouseEventKind};
+
+    if !matches!(app.modal, Modal::None) || app.show_help {
+        return;
+    }
+    match mouse.kind {
+        MouseEventKind::ScrollUp => app.selected = app.selected.saturating_sub(1),
+        MouseEventKind::ScrollDown => {
+            let len = app.current_len();
+            if len > 0 {
+                app.selected = (app.selected + 1).min(len - 1);
+            }
+        }
+        MouseEventKind::Down(MouseButton::Left) if mouse.row <= 2 => {
+            if let Some(tab) = tab_at_column(app, mouse.column) {
+                app.tab = tab;
+                app.selected = 0;
+                on_tab_enter(app, write).await;
+            }
+        }
+        MouseEventKind::Down(MouseButton::Left)
+            if app.viewport_width >= 90 && mouse.column < 22 && mouse.row >= 4 =>
+        {
+            if let Some(tab) = sidebar_tab_at_position(app, mouse.column, mouse.row) {
+                app.tab = tab;
+                app.selected = 0;
+                on_tab_enter(app, write).await;
+            }
+        }
+        MouseEventKind::Down(MouseButton::Left) if mouse.row >= 6 => {
+            let row = ((mouse.row - 6) / 2) as usize;
+            let len = app.current_len();
+            if len > 0 {
+                app.selected = row.min(len - 1);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn sidebar_tab_at_position(app: &App, column: u16, row: u16) -> Option<usize> {
+    if app.viewport_width < 90 || column >= 22 || row < 4 {
+        return None;
+    }
+    group_views(group_for_tab(app.tab))
+        .get((row - 4) as usize)
+        .copied()
+}
+
+fn tab_at_column(app: &App, column: u16) -> Option<usize> {
+    let labels = if app.viewport_width >= 82 {
+        &GROUPS
+    } else if app.viewport_width >= 45 {
+        &GROUPS_COMPACT
+    } else {
+        return None;
+    };
+    if app.viewport_width >= 45 {
+        let mut x = 0u16;
+        for (group, label) in labels.iter().enumerate() {
+            let width = label.len() as u16 + 8;
+            if (x..x + width).contains(&column) {
+                return Some(group_views(group)[0]);
+            }
+            x += width;
+        }
+        return None;
+    }
+    None
+}
+
+async fn handle_command_palette_key(app: &mut App, code: KeyCode, write: &mut WsWrite) {
+    let Modal::CommandPalette(palette) = &mut app.modal else {
+        return;
+    };
+    match code {
+        KeyCode::Esc => app.modal = Modal::None,
+        KeyCode::Up => palette.selected = palette.selected.saturating_sub(1),
+        KeyCode::Down => {
+            let len = palette_actions(&palette.query).len();
+            if len > 0 {
+                palette.selected = (palette.selected + 1).min(len - 1);
+            }
+        }
+        KeyCode::Backspace => {
+            palette.query.pop();
+            palette.selected = 0;
+        }
+        KeyCode::Char(c) => {
+            palette.query.push(c);
+            palette.selected = 0;
+        }
+        KeyCode::Enter => {
+            let action = palette_actions(&palette.query)
+                .get(palette.selected)
+                .copied();
+            app.modal = Modal::None;
+            match action {
+                Some(PaletteAction::GoTo(tab)) => {
+                    app.tab = tab;
+                    app.selected = 0;
+                    on_tab_enter(app, write).await;
+                }
+                Some(PaletteAction::Create) => open_create_form(app),
+                Some(PaletteAction::Refresh) => {
+                    app.status = "refreshing…".into();
+                    refresh_all(app, write).await;
+                }
+                Some(PaletteAction::Help) => app.show_help = true,
+                Some(PaletteAction::Quit) => app.should_quit = true,
+                None => {}
+            }
+        }
+        _ => {}
+    }
+}
+
 // ── modal input ─────────────────────────────────────────────────
 
 async fn handle_form_key(app: &mut App, code: KeyCode, write: &mut WsWrite) {
@@ -906,9 +1524,45 @@ async fn handle_form_key(app: &mut App, code: KeyCode, write: &mut WsWrite) {
     };
     match code {
         KeyCode::Esc => app.modal = Modal::None,
-        KeyCode::Tab | KeyCode::Down => form.focus = (form.focus + 1) % form.fields.len(),
+        KeyCode::F(2) if matches!(form.kind, FormKind::CreateFs) => {
+            form.focus = if form.focus < 6 { 6 } else { 0 };
+            form.hint = if form.focus < 6 {
+                "F2 advanced · space toggles a device · ◂▸ chooses".into()
+            } else {
+                "F2 basic · blank/default fields use upstream defaults".into()
+            };
+        }
+        KeyCode::Tab | KeyCode::Down => {
+            let (start, end) = if matches!(form.kind, FormKind::CreateFs) {
+                if form.focus < 6 {
+                    (0, 6)
+                } else {
+                    (6, form.fields.len())
+                }
+            } else {
+                (0, form.fields.len())
+            };
+            form.focus = if form.focus + 1 >= end {
+                start
+            } else {
+                form.focus + 1
+            };
+        }
         KeyCode::BackTab | KeyCode::Up => {
-            form.focus = (form.focus + form.fields.len() - 1) % form.fields.len()
+            let (start, end) = if matches!(form.kind, FormKind::CreateFs) {
+                if form.focus < 6 {
+                    (0, 6)
+                } else {
+                    (6, form.fields.len())
+                }
+            } else {
+                (0, form.fields.len())
+            };
+            form.focus = if form.focus == start {
+                end - 1
+            } else {
+                form.focus - 1
+            };
         }
         KeyCode::Left | KeyCode::Right => {
             if let Some(field) = form.fields.get_mut(form.focus) {
@@ -1019,7 +1673,7 @@ fn open_create_form(app: &mut App) {
             let free = app.free_device_paths();
             Form {
                 title: "new bcachefs filesystem".into(),
-                hint: "space toggles a device · ◂▸ moves between devices".into(),
+                hint: "F2 advanced · space toggles a device · ◂▸ moves between devices".into(),
                 fields: vec![
                     FormField::text("name", "tank"),
                     FormField::multi("devices", free),
@@ -1031,6 +1685,59 @@ fn open_create_form(app: &mut App) {
                     ),
                     FormField::select("encryption", vec!["no".into(), "yes".into()], 0),
                     FormField::secret("passphrase"),
+                    FormField::text("foreground target", ""),
+                    FormField::text("background target", ""),
+                    FormField::text("promote target", ""),
+                    FormField::text("metadata target", ""),
+                    FormField::select("erasure code", vec!["no".into(), "yes".into()], 0),
+                    FormField::select(
+                        "data checksum",
+                        vec![
+                            "default".into(),
+                            "crc32c".into(),
+                            "crc64".into(),
+                            "xxhash".into(),
+                            "none".into(),
+                        ],
+                        0,
+                    ),
+                    FormField::select(
+                        "metadata checksum",
+                        vec![
+                            "default".into(),
+                            "crc32c".into(),
+                            "crc64".into(),
+                            "xxhash".into(),
+                            "none".into(),
+                        ],
+                        0,
+                    ),
+                    FormField::text("label", ""),
+                    FormField::text("bucket size", ""),
+                    FormField::text("encoded extent max", ""),
+                    FormField::text("journal flush us", ""),
+                    FormField::select(
+                        "io scheduler",
+                        vec![
+                            "default".into(),
+                            "none".into(),
+                            "mq-deadline".into(),
+                            "kyber".into(),
+                        ],
+                        0,
+                    ),
+                    FormField::select(
+                        "version upgrade",
+                        vec![
+                            "default".into(),
+                            "compatible".into(),
+                            "incompatible".into(),
+                            "none".into(),
+                        ],
+                        0,
+                    ),
+                    FormField::select("store key", vec!["yes".into(), "no".into()], 0),
+                    FormField::select("bind to TPM", vec!["no".into(), "yes".into()], 0),
                 ],
                 focus: 0,
                 kind: FormKind::CreateFs,
@@ -1190,6 +1897,67 @@ fn open_create_form(app: &mut App) {
         _ => return,
     };
     app.modal = Modal::Form(form);
+}
+
+fn open_edit_fs_form(app: &mut App) {
+    let Some(fs) = app.filesystems.get(app.selected) else {
+        return;
+    };
+    let name = str_of(fs, "name");
+    let options = fs.get("options").unwrap_or(&Value::Null);
+    let option = |key: &str| options.get(key).and_then(Value::as_str).unwrap_or_default();
+    let strip = app.fs_strip.get(&name);
+    let reconcile_idx = usize::from(
+        !strip
+            .and_then(|s| s[0].as_ref())
+            .and_then(|v| v.get("enabled"))
+            .and_then(Value::as_bool)
+            .unwrap_or(true),
+    );
+    let copygc_idx = usize::from(
+        !strip
+            .and_then(|s| s[1].as_ref())
+            .and_then(Value::as_bool)
+            .unwrap_or(true),
+    );
+    app.modal = Modal::Form(Form {
+        title: format!("edit filesystem · {name}"),
+        hint: "blank fields leave the current value unchanged".into(),
+        fields: vec![
+            FormField::text("compression", option("compression")),
+            FormField::text("background comp", option("background_compression")),
+            FormField::text("foreground target", option("foreground_target")),
+            FormField::text("background target", option("background_target")),
+            FormField::text("promote target", option("promote_target")),
+            FormField::text("metadata target", option("metadata_target")),
+            FormField::text("data replicas", ""),
+            FormField::text("metadata replicas", ""),
+            FormField::select(
+                "error action",
+                vec![
+                    "unchanged".into(),
+                    "continue".into(),
+                    "ro".into(),
+                    "panic".into(),
+                ],
+                0,
+            ),
+            FormField::select(
+                "io scheduler",
+                vec![
+                    "unchanged".into(),
+                    "none".into(),
+                    "mq-deadline".into(),
+                    "kyber".into(),
+                ],
+                0,
+            ),
+            FormField::select("reconcile", vec!["on".into(), "off".into()], reconcile_idx),
+            FormField::select("copygc", vec!["on".into(), "off".into()], copygc_idx),
+        ],
+        focus: 0,
+        kind: FormKind::EditFs { name },
+    });
 }
 
 enum SubvolAction {
@@ -1653,8 +2421,18 @@ async fn open_fs_status(app: &mut App, write: &mut WsWrite) {
     let name = str_of(fs, "name");
     app.fs_usage = None;
     app.fs_scrub = None;
+    app.fs_fsck = None;
+    app.fs_reconcile = None;
+    app.fs_copygc = None;
+    app.fs_raw = None;
     app.modal = Modal::FsStatus(FsStatus { name: name.clone() });
-    for (id, method) in [(ID_FS_USAGE, "fs.usage"), (ID_FS_SCRUB, "fs.scrub.status")] {
+    for (id, method) in [
+        (ID_FS_USAGE, "fs.usage"),
+        (ID_FS_SCRUB, "fs.scrub.status"),
+        (ID_FS_FSCK, "fs.fsck.status"),
+        (ID_FS_RECONCILE, "fs.reconcile.status"),
+        (ID_FS_COPYGC, "fs.copygc.status"),
+    ] {
         let _ = write
             .send(client::request(id, method, json!({"name": name})))
             .await;
@@ -1698,8 +2476,56 @@ async fn handle_fs_status_key(app: &mut App, code: KeyCode, write: &mut WsWrite)
                 ))
                 .await;
         }
+        KeyCode::Char('u') | KeyCode::Char('t') => {
+            let method = if code == KeyCode::Char('u') {
+                "bcachefs.usage"
+            } else {
+                "bcachefs.top"
+            };
+            app.fs_raw = None;
+            let _ = write
+                .send(client::request(ID_FS_RAW, method, json!({"name": name})))
+                .await;
+        }
+        KeyCode::Char('R') | KeyCode::Char('C') => {
+            let (domain, enabled) = if code == KeyCode::Char('R') {
+                (
+                    "reconcile",
+                    app.fs_reconcile
+                        .as_ref()
+                        .and_then(|v| v.get("enabled"))
+                        .and_then(Value::as_bool)
+                        .unwrap_or(true),
+                )
+            } else {
+                (
+                    "copygc",
+                    app.fs_copygc
+                        .as_ref()
+                        .and_then(Value::as_bool)
+                        .unwrap_or(true),
+                )
+            };
+            let method = if enabled { "disable" } else { "enable" };
+            let rpc = match (domain, method) {
+                ("reconcile", "disable") => "fs.reconcile.disable",
+                ("reconcile", _) => "fs.reconcile.enable",
+                ("copygc", "disable") => "fs.copygc.disable",
+                _ => "fs.copygc.enable",
+            };
+            let _ = write
+                .send(client::request(ID_ACTION, rpc, json!({"name": name})))
+                .await;
+        }
         KeyCode::Char('r') => {
-            for (id, method) in [(ID_FS_USAGE, "fs.usage"), (ID_FS_SCRUB, "fs.scrub.status")] {
+            app.fs_raw = None;
+            for (id, method) in [
+                (ID_FS_USAGE, "fs.usage"),
+                (ID_FS_SCRUB, "fs.scrub.status"),
+                (ID_FS_FSCK, "fs.fsck.status"),
+                (ID_FS_RECONCILE, "fs.reconcile.status"),
+                (ID_FS_COPYGC, "fs.copygc.status"),
+            ] {
                 let _ = write
                     .send(client::request(id, method, json!({"name": name})))
                     .await;
@@ -1874,8 +2700,17 @@ fn open_fs_devices_detail(app: &mut App) {
     let mut removes = Vec::new();
     let mut devices = Vec::new();
     for d in &raw {
-        let (path, label, state) = match d {
-            Value::String(s) => (s.clone(), "-".into(), "-".into()),
+        let (path, label, state, durability, errors, flags, action_device, missing) = match d {
+            Value::String(s) => (
+                s.clone(),
+                "-".into(),
+                "-".into(),
+                "-".into(),
+                "-".into(),
+                "-".into(),
+                s.clone(),
+                false,
+            ),
             _ => (
                 str_of(d, "path"),
                 d.get("label")
@@ -1886,24 +2721,60 @@ fn open_fs_devices_detail(app: &mut App) {
                     .and_then(|v| v.as_str())
                     .unwrap_or("rw")
                     .into(),
+                d.get("durability")
+                    .and_then(Value::as_u64)
+                    .map(|v| v.to_string())
+                    .unwrap_or_else(|| "-".into()),
+                format!(
+                    "r{} w{} c{}",
+                    d.get("read_errors").and_then(Value::as_u64).unwrap_or(0),
+                    d.get("write_errors").and_then(Value::as_u64).unwrap_or(0),
+                    d.get("checksum_errors")
+                        .and_then(Value::as_u64)
+                        .unwrap_or(0),
+                ),
+                format!(
+                    "{}{}{}",
+                    if d.get("missing").and_then(Value::as_bool).unwrap_or(false) {
+                        "MISSING "
+                    } else {
+                        ""
+                    },
+                    if d.get("discard").and_then(Value::as_bool).unwrap_or(false) {
+                        "trim "
+                    } else {
+                        ""
+                    },
+                    match d.get("rotational").and_then(Value::as_bool) {
+                        Some(true) => "rot",
+                        Some(false) => "ssd",
+                        None => "-",
+                    },
+                ),
+                d.get("member_index")
+                    .and_then(Value::as_u64)
+                    .filter(|_| d.get("missing").and_then(Value::as_bool).unwrap_or(false))
+                    .map(|v| v.to_string())
+                    .unwrap_or_else(|| str_of(d, "path")),
+                d.get("missing").and_then(Value::as_bool).unwrap_or(false),
             ),
         };
-        rows.push(vec![path.clone(), label, state]);
+        rows.push(vec![path.clone(), label, state, durability, errors, flags]);
         removes.push(Some((
             "fs.device.remove",
-            json!({"filesystem": name, "device": path}),
+            json!({"filesystem": name, "device": action_device.clone(), "force": missing}),
         )));
-        devices.push(path);
+        devices.push(action_device);
     }
     let n = rows.len();
     app.modal = Modal::Detail(Detail {
         title: format!("devices · {name}"),
-        headers: vec!["device", "label", "state"],
+        headers: vec!["device", "label", "state", "dur", "errors", "flags"],
         rows,
         removes,
         toggles: vec![None; n],
         selected: 0,
-        hint: "a add · x remove · v evacuate · o online · O offline · r ro · w rw".into(),
+        hint: "a add · x remove · v evacuate · o/O online/offline · r/w ro/rw · l lock · b/B TPM bind/unbind".into(),
         ctx: DetailCtx::FsDevices { fs: name, devices },
     });
 }
@@ -2242,6 +3113,9 @@ fn fs_device_action(
         KeyCode::Char('O') => fire_dev("fs.device.offline", &fs, dev_path),
         KeyCode::Char('r') => set_state(&fs, dev_path, "ro"),
         KeyCode::Char('w') => set_state(&fs, dev_path, "rw"),
+        KeyCode::Char('l') => DetailAction::Fire("fs.lock", json!({"name": fs})),
+        KeyCode::Char('b') => DetailAction::Fire("fs.tpm.bind", json!({"name": fs})),
+        KeyCode::Char('B') => DetailAction::Fire("fs.tpm.unbind", json!({"name": fs})),
         _ => DetailAction::Nothing,
     }
 }
@@ -2568,6 +3442,26 @@ fn build_request(form: &mut Form) -> Result<(&'static str, Value), String> {
                 return Err("encryption needs a passphrase".into());
             }
             let specs: Vec<Value> = devices.iter().map(|d| json!({"path": d})).collect();
+            let erasure_code = get(10) == "yes";
+            if erasure_code && (replicas < 2 || devices.len() < replicas as usize + 1) {
+                return Err("erasure code needs replicas ≥ 2 and devices ≥ replicas + 1".into());
+            }
+            let nullable = |value: String| {
+                if value.is_empty() || value == "default" {
+                    Value::Null
+                } else {
+                    json!(value)
+                }
+            };
+            let journal_flush_delay = if get(16).is_empty() {
+                Value::Null
+            } else {
+                Value::from(
+                    get(16)
+                        .parse::<u32>()
+                        .map_err(|_| "journal flush must be microseconds")?,
+                )
+            };
             Ok((
                 "fs.create",
                 json!({
@@ -2577,6 +3471,58 @@ fn build_request(form: &mut Form) -> Result<(&'static str, Value), String> {
                     "compression": compression,
                     "encryption": encryption,
                     "passphrase": if get(5).is_empty() { Value::Null } else { json!(get(5)) },
+                    "foreground_target": nullable(get(6)),
+                    "background_target": nullable(get(7)),
+                    "promote_target": nullable(get(8)),
+                    "metadata_target": nullable(get(9)),
+                    "erasure_code": erasure_code,
+                    "data_checksum": nullable(get(11)),
+                    "metadata_checksum": nullable(get(12)),
+                    "label": nullable(get(13)),
+                    "bucket_size": nullable(get(14)),
+                    "encoded_extent_max": nullable(get(15)),
+                    "journal_flush_delay": journal_flush_delay,
+                    "io_scheduler": nullable(get(17)),
+                    "version_upgrade": nullable(get(18)),
+                    "store_key": get(19) == "yes",
+                    "bind_to_tpm": get(20) == "yes",
+                }),
+            ))
+        }
+        FormKind::EditFs { name } => {
+            let optional = |value: String| {
+                if value.is_empty() || value == "unchanged" {
+                    Value::Null
+                } else {
+                    json!(value)
+                }
+            };
+            let optional_u32 = |value: String, label: &str| -> Result<Value, String> {
+                if value.is_empty() {
+                    Ok(Value::Null)
+                } else {
+                    value
+                        .parse::<u32>()
+                        .map(Value::from)
+                        .map_err(|_| format!("{label} must be a positive integer"))
+                }
+            };
+            Ok((
+                "fs.options.update",
+                json!({
+                    "name": name,
+                    "compression": optional(get(0)),
+                    "background_compression": optional(get(1)),
+                    "foreground_target": optional(get(2)),
+                    "background_target": optional(get(3)),
+                    "promote_target": optional(get(4)),
+                    "metadata_target": optional(get(5)),
+                    "data_replicas": optional_u32(get(6), "data replicas")?,
+                    "metadata_replicas": optional_u32(get(7), "metadata replicas")?,
+                    "error_action": optional(get(8)),
+                    "io_scheduler": optional(get(9)),
+                    "reconcile_enabled": get(10) == "on",
+                    "copygc_enabled": get(11) == "on",
                 }),
             ))
         }
@@ -2857,6 +3803,34 @@ async fn store_response(app: &mut App, id: i64, val: Value, write: &mut WsWrite)
         ID_FS => {
             app.filesystems = as_array(val);
             request_snapshots(app, write).await;
+            for (index, fs) in app.filesystems.iter().enumerate() {
+                if !fs.get("mounted").and_then(Value::as_bool).unwrap_or(false) {
+                    continue;
+                }
+                let name = str_of(fs, "name");
+                for (offset, method) in [
+                    "fs.reconcile.status",
+                    "fs.copygc.status",
+                    "fs.scrub.status",
+                    "fs.fsck.status",
+                ]
+                .into_iter()
+                .enumerate()
+                {
+                    let id = ID_FS_STRIP_BASE + index as i64 * 4 + offset as i64;
+                    let _ = write
+                        .send(client::request(id, method, json!({"name": name})))
+                        .await;
+                }
+            }
+        }
+        id if id >= ID_FS_STRIP_BASE => {
+            let slot = ((id - ID_FS_STRIP_BASE) % 4) as usize;
+            let index = ((id - ID_FS_STRIP_BASE) / 4) as usize;
+            if let Some(fs) = app.filesystems.get(index) {
+                let name = str_of(fs, "name");
+                app.fs_strip.entry(name).or_default()[slot] = Some(val);
+            }
         }
         ID_SUBVOL => app.subvolumes = as_array(val),
         ID_NFS => app.nfs = as_array(val),
@@ -2892,6 +3866,10 @@ async fn store_response(app: &mut App, id: i64, val: Value, write: &mut WsWrite)
         ID_DISKS => app.disks = as_array(val),
         ID_FS_USAGE => app.fs_usage = Some(val),
         ID_FS_SCRUB => app.fs_scrub = Some(val),
+        ID_FS_FSCK => app.fs_fsck = Some(val),
+        ID_FS_RECONCILE => app.fs_reconcile = Some(val),
+        ID_FS_COPYGC => app.fs_copygc = Some(val),
+        ID_FS_RAW => app.fs_raw = val.as_str().map(ToString::to_string),
         ID_LOGS => app.logs = Some(val.as_str().unwrap_or_default().to_string()),
         ID_FILES => app.files = as_array(val),
         ID_SSH => app.ssh = Some(val),
@@ -3134,5 +4112,34 @@ mod tests {
             kind: FormKind::CreateUser,
         };
         assert!(build_request(&mut form).is_err());
+    }
+
+    #[test]
+    fn command_palette_filters_and_tab_hit_testing_work() {
+        let matches = palette_actions("file");
+        assert!(
+            matches
+                .iter()
+                .any(|action| matches!(action, PaletteAction::GoTo(TAB_FILESYSTEMS)))
+        );
+
+        let mut app = App::for_test();
+        app.viewport_width = 180;
+        assert_eq!(tab_at_column(&app, 3), Some(0));
+    }
+
+    #[test]
+    fn views_are_grouped_into_five_primary_sections() {
+        assert_eq!(group_for_tab(TAB_FILESYSTEMS), 1);
+        assert_eq!(group_views(1), &[1, 2, 3, 4]);
+        assert_eq!(group_for_tab(TAB_PROTOCOLS), 2);
+        assert_eq!(group_views(4), &[9, 10]);
+
+        let mut app = App::for_test();
+        app.viewport_width = 110;
+        app.tab = TAB_FILESYSTEMS;
+        assert_eq!(sidebar_tab_at_position(&app, 4, 4), Some(TAB_DEVICES));
+        assert_eq!(sidebar_tab_at_position(&app, 4, 7), Some(TAB_SNAPSHOTS));
+        assert_eq!(sidebar_tab_at_position(&app, 24, 4), None);
     }
 }

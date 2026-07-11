@@ -7,6 +7,7 @@
 pub mod auth;
 pub mod client;
 pub mod config;
+pub mod metrics;
 pub mod rest;
 pub mod rpc;
 pub mod server;

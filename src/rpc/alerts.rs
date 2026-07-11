@@ -58,20 +58,9 @@ pub(super) async fn try_route(
     })
 }
 
-/// Evaluate the configured alert rules against live data. Metrics-daemon
-/// absence means CPU/memory/temperature rules can't be judged — return
-/// the filesystem-only evaluation rather than fabricating readings.
+/// Evaluate configured alert rules against metrics collected by nasttyd.
 async fn evaluate_active_alerts(state: &AppState) -> Vec<alerts::ActiveAlert> {
-    let stats =
-        match fetch_metrics_json::<nasty_system::SystemStats>(&state.metrics_client, "/api/stats")
-            .await
-        {
-            Ok(v) => v,
-            Err(e) => {
-                tracing::debug!("alert evaluation: stats fetch failed: {e}");
-                return Vec::new();
-            }
-        };
+    let stats = state.metrics.stats().await;
 
     let filesystems = match state.filesystems.list().await {
         Ok(v) => v,
@@ -94,9 +83,7 @@ async fn evaluate_active_alerts(state: &AppState) -> Vec<alerts::ActiveAlert> {
         .is_enabled(nasty_system::protocol::Protocol::Smart)
         .await
     {
-        fetch_metrics_json(&state.metrics_client, "/api/disks")
-            .await
-            .unwrap_or_default()
+        state.metrics.disks().await
     } else {
         Vec::new()
     };
@@ -116,10 +103,7 @@ async fn evaluate_active_alerts(state: &AppState) -> Vec<alerts::ActiveAlert> {
         })
         .collect();
 
-    let kernel_summary: nasty_common::metrics_types::KernelErrorSummary =
-        fetch_metrics_json(&state.metrics_client, "/api/kernel_errors")
-            .await
-            .unwrap_or_default();
+    let kernel_summary = state.metrics.kernel_errors().await;
     let kernel_errors = alerts::KernelErrorAlert {
         total_count: kernel_summary.total_count,
         categories: kernel_summary

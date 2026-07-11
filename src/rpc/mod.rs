@@ -3,6 +3,7 @@
 
 mod alerts;
 mod auth;
+mod bcachefs;
 mod files;
 mod fs;
 mod service;
@@ -81,24 +82,6 @@ pub(crate) async fn require_protocol(
     } else {
         None
     }
-}
-
-/// Fetch JSON from the (optional) nasty-metrics service.
-pub(crate) async fn fetch_metrics_json<T: serde::de::DeserializeOwned>(
-    client: &reqwest::Client,
-    path: &str,
-) -> Result<T, String> {
-    let url = format!("{}{path}", crate::state::METRICS_BASE);
-    let resp = client
-        .get(&url)
-        .send()
-        .await
-        .map_err(|e| format!("metrics service unavailable: {e}"))?
-        .error_for_status()
-        .map_err(|e| format!("metrics service error: {e}"))?;
-    resp.json::<T>()
-        .await
-        .map_err(|e| format!("metrics parse error: {e}"))
 }
 
 /// Gate an RDMA-transport request (iSER portal, NVMe-oF rdma port) on
@@ -223,6 +206,10 @@ fn is_read_only(method: &str) -> bool {
                 | "auth.me"
                 | "files.browse"
                 | "fs.usage"
+                | "fs.moving_ctxts"
+                | "bcachefs.usage"
+                | "bcachefs.top"
+                | "bcachefs.timestats"
                 | "subvolume.list_all"
                 | "subvolume.children"
                 | "subvolume.find_by_property"
@@ -244,7 +231,16 @@ fn is_operator_allowed(method: &str) -> bool {
         || method.starts_with("smb.")
         || method.starts_with("service.protocol.")
         || method.starts_with("files.")
-        || matches!(method, "fs.mount" | "fs.unmount")
+        || matches!(
+            method,
+            "fs.mount"
+                | "fs.unmount"
+                | "fs.lock"
+                | "fs.reconcile.enable"
+                | "fs.reconcile.disable"
+                | "fs.copygc.enable"
+                | "fs.copygc.disable"
+        )
 }
 
 /// Derive the collection name for a mutation method, or None if read-only.
@@ -333,6 +329,7 @@ async fn route(req: &Request, state: &AppState, session: &Session) -> Response {
         .unwrap_or(req.method.as_str());
     let resp = match prefix {
         "auth" => auth::try_route(req, state, session).await,
+        "bcachefs" => bcachefs::try_route(req, state).await,
         "alert" => alerts::try_route(req, state, session).await,
         "files" => files::try_route(req, state, session).await,
         "fs" | "device" => fs::try_route(req, state, session).await,

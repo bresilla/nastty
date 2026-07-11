@@ -5,7 +5,7 @@ use std::sync::Arc;
 use axum::{
     Json, Router,
     extract::State,
-    http::StatusCode,
+    http::{StatusCode, header},
     response::IntoResponse,
     routing::{get, post},
 };
@@ -21,12 +21,24 @@ const COOKIE_MAX_AGE_SECS: u64 = 8 * 3600;
 pub fn build_router(state: Arc<AppState>) -> Router {
     Router::new()
         .route("/health", get(health_handler))
+        .route("/metrics", get(metrics_handler))
         .route("/api/login", post(login_handler))
         .route("/api/logout", post(logout_handler))
         .route("/api/auth/check", get(auth_check_handler))
         .route("/ws", get(crate::ws::ws_handler))
         .merge(crate::rest::routes())
         .with_state(state)
+}
+
+async fn metrics_handler(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+    (
+        StatusCode::OK,
+        [(
+            header::CONTENT_TYPE,
+            "text/plain; version=0.0.4; charset=utf-8",
+        )],
+        state.metrics.prometheus().await,
+    )
 }
 
 pub async fn serve(

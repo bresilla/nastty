@@ -18,31 +18,15 @@ pub(super) async fn try_route(
         "system.health" => ok(req, state.system.health().await),
         "system.hardware.summary" => ok(req, nasty_system::hardware::system_summary().await),
 
-        // ── live metrics (need the nasty-metrics daemon) ────────
-        "system.stats" => match fetch_metrics_json::<nasty_system::SystemStats>(
-            &state.metrics_client,
-            "/api/stats",
-        )
-        .await
-        {
-            Ok(v) => ok(req, v),
-            Err(e) => err(req, e),
-        },
+        // ── live metrics (collected inside nasttyd) ─────────────
+        "system.stats" => ok(req, state.metrics.stats().await),
         "system.disks" => {
             if state
                 .protocols
                 .is_enabled(nasty_system::protocol::Protocol::Smart)
                 .await
             {
-                match fetch_metrics_json::<Vec<nasty_system::DiskHealth>>(
-                    &state.metrics_client,
-                    "/api/disks",
-                )
-                .await
-                {
-                    Ok(v) => ok(req, v),
-                    Err(e) => err(req, e),
-                }
+                ok(req, state.metrics.disks().await)
             } else {
                 ok(req, Vec::<nasty_system::DiskHealth>::new())
             }
@@ -58,40 +42,9 @@ pub(super) async fn try_route(
                 .and_then(|v| v.as_i64())
                 .unwrap_or(0)
                 .max(0);
-            let mut url = format!(
-                "{}/api/history?kind={kind}&range={range}&offset={offset}",
-                crate::state::METRICS_BASE
-            );
-            if let Some(n) = name {
-                url.push_str(&format!("&name={n}"));
-            }
-            match state
-                .metrics_client
-                .get(&url)
-                .send()
-                .await
-                .and_then(|r| r.error_for_status())
-            {
-                Ok(resp) => match resp
-                    .json::<Vec<nasty_common::metrics_types::ResourceHistory>>()
-                    .await
-                {
-                    Ok(v) => ok(req, v),
-                    Err(e) => err(req, format!("metrics parse error: {e}")),
-                },
-                Err(e) => err(req, format!("metrics service error: {e}")),
-            }
+            ok(req, state.metrics.history(kind, name, range, offset))
         }
-        "system.metrics.prometheus" => {
-            let url = format!("{}/metrics", crate::state::METRICS_BASE);
-            match state.metrics_client.get(&url).send().await {
-                Ok(resp) => match resp.text().await {
-                    Ok(text) => ok(req, text),
-                    Err(e) => err(req, format!("metrics read error: {e}")),
-                },
-                Err(e) => err(req, format!("metrics service unavailable: {e}")),
-            }
-        }
+        "system.metrics.prometheus" => ok(req, state.metrics.prometheus().await),
 
         // ── journal logs ────────────────────────────────────────
         "system.logs" => {

@@ -7,9 +7,6 @@ use std::sync::Arc;
 /// The payload is the collection name (e.g. "filesystem", "subvolume", "share.nfs").
 pub type EventBus = tokio::sync::broadcast::Sender<String>;
 
-/// Base URL of the (optional) nasty-metrics daemon.
-pub const METRICS_BASE: &str = "http://127.0.0.1:2138";
-
 pub struct AppState {
     pub auth: crate::auth::AuthService,
     pub events: EventBus,
@@ -20,7 +17,7 @@ pub struct AppState {
     pub network: nasty_system::network::NetworkService,
     pub nut: nasty_system::nut::NutService,
     pub firewall: nasty_system::firewall::FirewallService,
-    pub metrics_client: reqwest::Client,
+    pub metrics: Arc<crate::metrics::MetricsService>,
     pub protocols: nasty_system::protocol::ProtocolService,
     pub filesystems: nasty_storage::FilesystemService,
     pub subvolumes: Arc<nasty_storage::SubvolumeService>,
@@ -37,6 +34,8 @@ impl AppState {
         let subvolumes = Arc::new(nasty_storage::SubvolumeService::new(
             nasty_storage::FilesystemService::new(),
         ));
+        let metrics = crate::metrics::MetricsService::new();
+        metrics.start();
         Self {
             auth: crate::auth::AuthService::new().await,
             events: event_tx,
@@ -47,7 +46,7 @@ impl AppState {
             network: nasty_system::network::NetworkService::new(),
             nut: nasty_system::nut::NutService::new().await,
             firewall: nasty_system::firewall::FirewallService::new(),
-            metrics_client: reqwest::Client::new(),
+            metrics,
             protocols: nasty_system::protocol::ProtocolService::new(),
             filesystems: nasty_storage::FilesystemService::new(),
             snapshots: nasty_snapshot::SnapshotService::new(subvolumes.clone()),
