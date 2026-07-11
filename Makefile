@@ -25,7 +25,7 @@ build:
 	@$(CARGO) build --bin nastty
 
 build-release:
-	@$(CARGO) build --release --locked --bin nastty
+	@$(CARGO) build --release --bin nastty
 
 b: build
 
