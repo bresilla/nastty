@@ -207,6 +207,7 @@ enum FormKind {
     },
     FsDeviceAdd {
         filesystem: String,
+        backend: String,
     },
     IscsiAddLun {
         id: String,
@@ -247,13 +248,15 @@ pub(super) struct Reveal {
     pub secret: String,
 }
 
-/// Drill-down view of an entity's sub-resources (a filesystem's member
-/// devices, an iSCSI target's LUNs, an NVMe-oF subsystem's namespaces),
-/// with per-item actions.
+/// Drill-down view of an entity's sub-resources with per-item actions.
+/// Every row carries an optional (method, params) remove spec so `x`
+/// deletes exactly what's selected — LUN, portal, ACL, device, etc.
 pub(super) struct Detail {
     pub title: String,
     pub headers: Vec<&'static str>,
     pub rows: Vec<Vec<String>>,
+    /// Parallel to `rows`: how to remove each, or None if not removable.
+    removes: Vec<Option<(&'static str, Value)>>,
     pub selected: usize,
     pub hint: String,
     ctx: DetailCtx,
@@ -261,13 +264,17 @@ pub(super) struct Detail {
 
 #[derive(Clone)]
 enum DetailCtx {
-    /// Member devices of a filesystem; each `values[i]` is the raw device
-    /// entry (string path for btrfs, object for bcachefs).
-    FsDevices { fs: String, values: Vec<Value> },
-    /// iSCSI target LUNs; `values[i]` is a LUN object.
-    IscsiLuns { id: String, values: Vec<Value> },
-    /// NVMe-oF subsystem namespaces; `values[i]` is a namespace object.
-    NvmeofNamespaces { id: String, values: Vec<Value> },
+    /// Filesystem member devices; `devices[i]` is the device path, parallel
+    /// to rows, for the online/offline/ro/rw/evacuate single-key actions.
+    FsDevices {
+        fs: String,
+        devices: Vec<String>,
+        backend: String,
+    },
+    /// iSCSI target — add-forms use the target id.
+    Iscsi { target_id: String },
+    /// NVMe-oF subsystem — add-forms use the subsystem id.
+    Nvmeof { subsystem_id: String },
 }
 
 /// Scrollable journal-log viewer.
@@ -1681,35 +1688,49 @@ fn open_fs_devices_detail(app: &mut App) {
         return;
     };
     let name = str_of(fs, "name");
-    let values = fs
+    let raw = fs
         .get("devices")
         .and_then(|v| v.as_array())
         .cloned()
         .unwrap_or_default();
-    let rows = values
-        .iter()
-        .map(|d| match d {
-            Value::String(s) => vec![s.clone(), "-".into(), "-".into()],
-            _ => vec![
+    let mut rows = Vec::new();
+    let mut removes = Vec::new();
+    let mut devices = Vec::new();
+    for d in &raw {
+        let (path, label, state) = match d {
+            Value::String(s) => (s.clone(), "-".into(), "-".into()),
+            _ => (
                 str_of(d, "path"),
                 d.get("label")
                     .and_then(|v| v.as_str())
                     .unwrap_or("-")
-                    .to_string(),
+                    .into(),
                 d.get("state")
                     .and_then(|v| v.as_str())
                     .unwrap_or("rw")
-                    .to_string(),
-            ],
-        })
-        .collect();
+                    .into(),
+            ),
+        };
+        rows.push(vec![path.clone(), label, state]);
+        removes.push(Some((
+            "fs.device.remove",
+            json!({"filesystem": name, "device": path}),
+        )));
+        devices.push(path);
+    }
+    let backend = str_of(fs, "backend");
     app.modal = Modal::Detail(Detail {
         title: format!("devices · {name}"),
         headers: vec!["device", "label", "state"],
         rows,
+        removes,
         selected: 0,
         hint: "a add · x remove · v evacuate · o online · O offline · r ro · w rw".into(),
-        ctx: DetailCtx::FsDevices { fs: name, values },
+        ctx: DetailCtx::FsDevices {
+            fs: name,
+            devices,
+            backend,
+        },
     });
 }
 
@@ -1717,58 +1738,126 @@ fn open_share_detail(app: &mut App) {
     match app.shares_selection() {
         SharesSelection::Iscsi(i) => {
             let Some(t) = app.iscsi.get(i) else { return };
-            let id = str_of(t, "id");
-            let values = t
+            let tid = str_of(t, "id");
+            let mut rows = Vec::new();
+            let mut removes = Vec::new();
+            for lun in t
                 .get("luns")
                 .and_then(|v| v.as_array())
                 .cloned()
-                .unwrap_or_default();
-            let rows = values
-                .iter()
-                .map(|l| {
-                    vec![
-                        l.get("lun_id")
-                            .map(|v| v.to_string())
-                            .unwrap_or_else(|| "-".into()),
-                        str_of(l, "backstore_path"),
-                    ]
-                })
-                .collect();
+                .unwrap_or_default()
+            {
+                let lun_id = lun.get("lun_id").cloned().unwrap_or(Value::Null);
+                rows.push(vec![
+                    "lun".into(),
+                    lun_id.to_string(),
+                    str_of(&lun, "backstore_path"),
+                ]);
+                removes.push(Some((
+                    "share.iscsi.remove_lun",
+                    json!({"target_id": tid, "lun_id": lun_id}),
+                )));
+            }
+            for p in t
+                .get("portals")
+                .and_then(|v| v.as_array())
+                .cloned()
+                .unwrap_or_default()
+            {
+                let ip = str_of(&p, "ip");
+                let port = p.get("port").cloned().unwrap_or(Value::Null);
+                rows.push(vec!["portal".into(), format!("{ip}:{port}"), String::new()]);
+                removes.push(Some((
+                    "share.iscsi.remove_portal",
+                    json!({"target_id": tid, "ip": ip, "port": port}),
+                )));
+            }
+            for a in t
+                .get("acls")
+                .and_then(|v| v.as_array())
+                .cloned()
+                .unwrap_or_default()
+            {
+                let iqn = str_of(&a, "initiator_iqn");
+                rows.push(vec!["acl".into(), iqn.clone(), str_of(&a, "userid")]);
+                removes.push(Some((
+                    "share.iscsi.remove_acl",
+                    json!({"target_id": tid, "initiator_iqn": iqn}),
+                )));
+            }
             app.modal = Modal::Detail(Detail {
-                title: format!("luns · {}", str_of(t, "name")),
-                headers: vec!["lun", "backstore"],
+                title: format!("iscsi · {}", str_of(t, "name")),
+                headers: vec!["kind", "value", "detail"],
                 rows,
+                removes,
                 selected: 0,
-                hint: "a add LUN · x remove · p add portal · c add ACL".into(),
-                ctx: DetailCtx::IscsiLuns { id, values },
+                hint: "x remove · a LUN · p portal · c ACL".into(),
+                ctx: DetailCtx::Iscsi { target_id: tid },
             });
         }
         SharesSelection::Nvmeof(i) => {
             let Some(s) = app.nvmeof.get(i) else { return };
-            let id = str_of(s, "id");
-            let values = s
+            let sid = str_of(s, "id");
+            let mut rows = Vec::new();
+            let mut removes = Vec::new();
+            for ns in s
                 .get("namespaces")
                 .and_then(|v| v.as_array())
                 .cloned()
-                .unwrap_or_default();
-            let rows = values
-                .iter()
-                .map(|n| {
-                    vec![
-                        n.get("nsid")
-                            .map(|v| v.to_string())
-                            .unwrap_or_else(|| "-".into()),
-                        str_of(n, "device_path"),
-                    ]
-                })
-                .collect();
+                .unwrap_or_default()
+            {
+                let nsid = ns.get("nsid").cloned().unwrap_or(Value::Null);
+                rows.push(vec![
+                    "namespace".into(),
+                    nsid.to_string(),
+                    str_of(&ns, "device_path"),
+                ]);
+                removes.push(Some((
+                    "share.nvmeof.remove_namespace",
+                    json!({"subsystem_id": sid, "nsid": nsid}),
+                )));
+            }
+            for p in s
+                .get("ports")
+                .and_then(|v| v.as_array())
+                .cloned()
+                .unwrap_or_default()
+            {
+                let port_id = p.get("port_id").cloned().unwrap_or(Value::Null);
+                rows.push(vec![
+                    "port".into(),
+                    format!("{}:{}", str_of(&p, "addr"), str_of(&p, "service_id")),
+                    str_of(&p, "transport"),
+                ]);
+                removes.push(Some((
+                    "share.nvmeof.remove_port",
+                    json!({"subsystem_id": sid, "port_id": port_id}),
+                )));
+            }
+            for h in s
+                .get("hosts")
+                .and_then(|v| v.as_array())
+                .cloned()
+                .unwrap_or_default()
+            {
+                let nqn = match &h {
+                    Value::String(x) => x.clone(),
+                    _ => str_of(&h, "host_nqn"),
+                };
+                rows.push(vec!["host".into(), nqn.clone(), String::new()]);
+                removes.push(Some((
+                    "share.nvmeof.remove_host",
+                    json!({"subsystem_id": sid, "host_nqn": nqn}),
+                )));
+            }
             app.modal = Modal::Detail(Detail {
-                title: format!("namespaces · {}", str_of(s, "name")),
-                headers: vec!["nsid", "device"],
+                title: format!("nvme-of · {}", str_of(s, "name")),
+                headers: vec!["kind", "value", "detail"],
                 rows,
+                removes,
                 selected: 0,
-                hint: "a add namespace · x remove · p add port · o add host".into(),
-                ctx: DetailCtx::NvmeofNamespaces { id, values },
+                hint: "x remove · a namespace · p port · o host".into(),
+                ctx: DetailCtx::Nvmeof { subsystem_id: sid },
             });
         }
         SharesSelection::Nfs(_) | SharesSelection::Smb(_) => {}
@@ -1794,19 +1883,31 @@ async fn handle_detail_key(app: &mut App, code: KeyCode, write: &mut WsWrite) {
             detail.selected = detail.selected.saturating_sub(1);
             return;
         }
+        // `x` removes the selected row using its own remove spec.
+        KeyCode::Char('x') => {
+            if let Some(Some((method, params))) = detail.removes.get(detail.selected).cloned() {
+                app.status = format!("{method}…");
+                let _ = write.send(client::request(ID_ACTION, method, params)).await;
+                app.modal = Modal::None;
+            }
+            return;
+        }
         _ => {}
     }
 
-    // Action keys build a Form/Confirm (replacing the Detail) or fire a
-    // request directly. Clone the ctx so the app.modal borrow is released
-    // before we read other app fields (free devices).
+    // Other keys are add-forms or (fs) per-device state actions. Clone the
+    // ctx so the app.modal borrow is released before reading other fields.
     let sel = detail.selected;
     let ctx = detail.ctx.clone();
     let free = app.free_device_paths();
     let action = match &ctx {
-        DetailCtx::FsDevices { fs, values } => fs_device_action(code, fs, values, sel, &free),
-        DetailCtx::IscsiLuns { id, values } => iscsi_action(code, id, values, sel),
-        DetailCtx::NvmeofNamespaces { id, values } => nvmeof_action(code, id, values, sel),
+        DetailCtx::FsDevices {
+            fs,
+            devices,
+            backend,
+        } => fs_device_action(code, fs, backend, devices.get(sel).cloned(), &free),
+        DetailCtx::Iscsi { target_id } => iscsi_add_action(code, target_id),
+        DetailCtx::Nvmeof { subsystem_id } => nvmeof_add_action(code, subsystem_id),
     };
     match action {
         DetailAction::Open(m) => app.modal = m,
@@ -1828,15 +1929,12 @@ enum DetailAction {
 fn fs_device_action(
     code: KeyCode,
     fs: &str,
-    values: &[Value],
-    sel: usize,
+    backend: &str,
+    dev_path: Option<String>,
     free: &[String],
 ) -> DetailAction {
-    let dev_path = values.get(sel).map(|d| match d {
-        Value::String(s) => s.clone(),
-        _ => str_of(d, "path"),
-    });
     let fs = fs.to_string();
+    let backend = backend.to_string();
     match code {
         KeyCode::Char('a') => {
             let free = free.to_vec();
@@ -1857,19 +1955,12 @@ fn fs_device_action(
                     FormField::text("durability", "1"),
                 ],
                 focus: 0,
-                kind: FormKind::FsDeviceAdd { filesystem: fs },
+                kind: FormKind::FsDeviceAdd {
+                    filesystem: fs,
+                    backend,
+                },
             }))
         }
-        KeyCode::Char('x') => match dev_path {
-            Some(dev) => DetailAction::Open(Modal::Confirm(Confirm {
-                message: format!("remove {dev} from {fs}?"),
-                type_to_confirm: None,
-                input: String::new(),
-                method: "fs.device.remove",
-                params: json!({"filesystem": fs, "device": dev}),
-            })),
-            None => DetailAction::Nothing,
-        },
         KeyCode::Char('v') => match dev_path {
             Some(dev) => DetailAction::Open(Modal::Confirm(Confirm {
                 message: format!("evacuate all data off {dev}? (bcachefs, background)"),
@@ -1905,8 +1996,8 @@ fn set_state(fs: &str, dev: Option<String>, state: &str) -> DetailAction {
     }
 }
 
-fn iscsi_action(code: KeyCode, id: &str, values: &[Value], sel: usize) -> DetailAction {
-    let id = id.to_string();
+fn iscsi_add_action(code: KeyCode, target_id: &str) -> DetailAction {
+    let id = target_id.to_string();
     match code {
         KeyCode::Char('a') => DetailAction::Open(Modal::Form(Form {
             title: "add LUN".into(),
@@ -1915,16 +2006,6 @@ fn iscsi_action(code: KeyCode, id: &str, values: &[Value], sel: usize) -> Detail
             focus: 0,
             kind: FormKind::IscsiAddLun { id },
         })),
-        KeyCode::Char('x') => match values.get(sel).and_then(|l| l.get("lun_id")).cloned() {
-            Some(lun_id) => DetailAction::Open(Modal::Confirm(Confirm {
-                message: format!("remove LUN {lun_id}?"),
-                type_to_confirm: None,
-                input: String::new(),
-                method: "share.iscsi.remove_lun",
-                params: json!({"id": id, "lun_id": lun_id}),
-            })),
-            None => DetailAction::Nothing,
-        },
         KeyCode::Char('p') => DetailAction::Open(Modal::Form(Form {
             title: "add portal".into(),
             hint: String::new(),
@@ -1950,8 +2031,8 @@ fn iscsi_action(code: KeyCode, id: &str, values: &[Value], sel: usize) -> Detail
     }
 }
 
-fn nvmeof_action(code: KeyCode, id: &str, values: &[Value], sel: usize) -> DetailAction {
-    let id = id.to_string();
+fn nvmeof_add_action(code: KeyCode, subsystem_id: &str) -> DetailAction {
+    let id = subsystem_id.to_string();
     match code {
         KeyCode::Char('a') => DetailAction::Open(Modal::Form(Form {
             title: "add namespace".into(),
@@ -1960,16 +2041,6 @@ fn nvmeof_action(code: KeyCode, id: &str, values: &[Value], sel: usize) -> Detai
             focus: 0,
             kind: FormKind::NvmeofAddNamespace { id },
         })),
-        KeyCode::Char('x') => match values.get(sel).and_then(|n| n.get("nsid")).cloned() {
-            Some(nsid) => DetailAction::Open(Modal::Confirm(Confirm {
-                message: format!("remove namespace {nsid}?"),
-                type_to_confirm: None,
-                input: String::new(),
-                method: "share.nvmeof.remove_namespace",
-                params: json!({"id": id, "nsid": nsid}),
-            })),
-            None => DetailAction::Nothing,
-        },
         KeyCode::Char('p') => DetailAction::Open(Modal::Form(Form {
             title: "add port".into(),
             hint: String::new(),
@@ -2315,25 +2386,40 @@ fn build_request(form: &mut Form) -> Result<(&'static str, Value), String> {
                 .unwrap_or_else(|_| Value::String(get(0)));
             Ok((method, json!({ *key: v })))
         }
-        FormKind::FsDeviceAdd { filesystem } => {
+        FormKind::FsDeviceAdd {
+            filesystem,
+            backend,
+        } => {
             let device = get(0);
             if device.starts_with('(') {
                 return Err("no free device selected".into());
             }
-            let mut p = json!({"filesystem": filesystem, "path": device});
-            if !get(1).is_empty() {
-                p["label"] = json!(get(1));
+            if backend == "btrfs" {
+                // btrfs expects a plain device string.
+                Ok((
+                    "fs.device.add",
+                    json!({"filesystem": filesystem, "device": device}),
+                ))
+            } else {
+                // bcachefs expects a DeviceSpec object.
+                let mut spec = json!({"path": device});
+                if !get(1).is_empty() {
+                    spec["label"] = json!(get(1));
+                }
+                if let Ok(d) = get(2).parse::<u32>() {
+                    spec["durability"] = json!(d);
+                }
+                Ok((
+                    "fs.device.add",
+                    json!({"filesystem": filesystem, "device": spec}),
+                ))
             }
-            if let Ok(d) = get(2).parse::<u32>() {
-                p["durability"] = json!(d);
-            }
-            Ok(("fs.device.add", p))
         }
         FormKind::IscsiAddLun { id } => {
             require(&get(0), "backstore_path")?;
             Ok((
                 "share.iscsi.add_lun",
-                json!({"id": id, "backstore_path": get(0)}),
+                json!({"target_id": id, "backstore_path": get(0)}),
             ))
         }
         FormKind::IscsiAddPortal { id } => {
@@ -2341,7 +2427,7 @@ fn build_request(form: &mut Form) -> Result<(&'static str, Value), String> {
             let port: u16 = get(1).parse().unwrap_or(3260);
             Ok((
                 "share.iscsi.add_portal",
-                json!({"id": id, "ip": get(0), "port": port}),
+                json!({"target_id": id, "ip": get(0), "port": port, "iser": false}),
             ))
         }
         FormKind::IscsiAddAcl { id } => {
@@ -2349,10 +2435,10 @@ fn build_request(form: &mut Form) -> Result<(&'static str, Value), String> {
             Ok((
                 "share.iscsi.add_acl",
                 json!({
-                    "id": id,
+                    "target_id": id,
                     "initiator_iqn": get(0),
-                    "userid": get(1),
-                    "password": get(2),
+                    "userid": if get(1).is_empty() { Value::Null } else { json!(get(1)) },
+                    "password": if get(2).is_empty() { Value::Null } else { json!(get(2)) },
                 }),
             ))
         }
@@ -2360,18 +2446,19 @@ fn build_request(form: &mut Form) -> Result<(&'static str, Value), String> {
             require(&get(0), "device_path")?;
             Ok((
                 "share.nvmeof.add_namespace",
-                json!({"id": id, "device_path": get(0)}),
+                json!({"subsystem_id": id, "device_path": get(0)}),
             ))
         }
         FormKind::NvmeofAddPort { id } => {
             require(&get(1), "addr")?;
+            let service_id: u16 = get(2).parse().unwrap_or(4420);
             Ok((
                 "share.nvmeof.add_port",
                 json!({
-                    "id": id,
+                    "subsystem_id": id,
                     "transport": get(0),
                     "addr": get(1),
-                    "service_id": get(2),
+                    "service_id": service_id,
                 }),
             ))
         }
@@ -2379,7 +2466,7 @@ fn build_request(form: &mut Form) -> Result<(&'static str, Value), String> {
             require(&get(0), "host_nqn")?;
             Ok((
                 "share.nvmeof.add_host",
-                json!({"id": id, "host_nqn": get(0)}),
+                json!({"subsystem_id": id, "host_nqn": get(0)}),
             ))
         }
     }
