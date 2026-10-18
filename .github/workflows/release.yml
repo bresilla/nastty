@@ -40,7 +40,7 @@ jobs:
             release-${{ runner.os }}-${{ runner.arch }}-
 
       - name: Build
-        run: make build-release
+        run: cargo build --release --bin nastty
 
       - name: Smoke test
         run: |

@@ -1,0 +1,82 @@
+name: nix-cache
+
+on:
+  push:
+    tags: ['*']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: nix-cache
+  cancel-in-progress: false
+
+jobs:
+  # Machines resolve the `nastty-<system>` pin on bresilla.cachix.org.
+  publish:
+    if: github.repository == 'bresilla/nastty'
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-24.04
+            system: x86_64-linux
+          - runner: ubuntu-24.04-arm
+            system: aarch64-linux
+    steps:
+      - name: Check publishing credentials
+        env:
+          CACHIX_AUTH_TOKEN: ${{ secrets.CACHIX_AUTH_TOKEN }}
+        run: |
+          if [ -z "$CACHIX_AUTH_TOKEN" ]; then
+            echo "::error::Add a bresilla cache write token as the CACHIX_AUTH_TOKEN Actions secret."
+            exit 1
+          fi
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: cachix/install-nix-action@v31
+      - uses: cachix/cachix-action@v16
+        with:
+          name: bresilla
+          skipPush: true
+      - name: Build the package and run its install check
+        run: |
+          nix build --accept-flake-config --print-build-logs \
+            --no-link --print-out-paths .#nastty > "$RUNNER_TEMP/store-paths"
+      - name: Publish the runtime closure
+        env:
+          CACHIX_AUTH_TOKEN: ${{ secrets.CACHIX_AUTH_TOKEN }}
+        run: cachix push bresilla < "$RUNNER_TEMP/store-paths"
+      - name: Pin the package
+        env:
+          CACHIX_AUTH_TOKEN: ${{ secrets.CACHIX_AUTH_TOKEN }}
+          SYSTEM: ${{ matrix.system }}
+        run: cachix pin bresilla "nastty-$SYSTEM" "$(cat "$RUNNER_TEMP/store-paths")" --keep-revisions 3
+
+  verify-download:
+    needs: publish
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-24.04
+          - runner: ubuntu-24.04-arm
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: cachix/install-nix-action@v31
+      - uses: cachix/cachix-action@v16
+        with:
+          name: bresilla
+          skipPush: true
+      - name: Download the package without building
+        run: |
+          nix build --accept-flake-config --max-jobs 0 --builders '' --out-link result .#nastty
+          result/bin/nastty --version
